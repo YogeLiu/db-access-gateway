@@ -1,0 +1,11 @@
+DB Access Gateway
+
+This product includes modified portions of GoNavi.
+GoNavi Copyright 2026 Syngnat
+Source: https://github.com/YogeLiu/GoNavi
+Revision used: 60ea586c674259d4214ad7d7e75dddfa706e577a
+License: Apache License 2.0
+
+The derived portions are identified in source-file headers and summarized in
+THIRD_PARTY_NOTICES.md.
+

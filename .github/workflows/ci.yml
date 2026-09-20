@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: npm ci && npm run build
+        working-directory: web
+      - run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -o /tmp/gateway ./cmd/gateway
+

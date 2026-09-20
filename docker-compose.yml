@@ -1,0 +1,49 @@
+services:
+  control-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: control-root-password
+      MYSQL_DATABASE: gateway
+      MYSQL_USER: gateway
+      MYSQL_PASSWORD: gateway-control-password
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - control-data:/var/lib/mysql
+
+  target-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: target-root-password
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - target-data:/var/lib/mysql
+      - ./deploy/target-init.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
+
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      CONTROL_DSN: gateway:gateway-control-password@tcp(control-mysql:3306)/gateway?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci
+      ADMIN_TOKEN: dev-admin-token-change-before-prod
+      TOKEN_PEPPER: dev-token-pepper-change-before-prod-32chars
+      DB_SECRET_DEMO_READ: demo-read-password
+      DB_SECRET_DEMO_WRITE: demo-write-password
+      DB_SECRET_DOC_AI_READ: ${DB_SECRET_DOC_AI_READ:-}
+    depends_on:
+      control-mysql:
+        condition: service_healthy
+      target-mysql:
+        condition: service_healthy
+
+volumes:
+  control-data:
+  target-data:
