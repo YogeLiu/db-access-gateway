@@ -21,10 +21,8 @@ type Resource struct {
 	Host               string    `json:"host"`
 	Port               uint16    `json:"port"`
 	DatabaseName       string    `json:"database_name"`
-	ReadUsername       string    `json:"read_username"`
-	ReadSecretRef      string    `json:"read_secret_ref"`
-	WriteUsername      *string   `json:"write_username,omitempty"`
-	WriteSecretRef     *string   `json:"write_secret_ref,omitempty"`
+	Username           string    `json:"username"`
+	SecretRef          string    `json:"secret_ref"`
 	TLSMode            string    `json:"tls_mode"`
 	MaxRows            uint32    `json:"max_rows"`
 	MaxWriteRows       uint32    `json:"max_write_rows"`

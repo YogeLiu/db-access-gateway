@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"github.com/yogel/db-access-gateway/internal/authz"
 	"github.com/yogel/db-access-gateway/internal/control"
 	"github.com/yogel/db-access-gateway/internal/masking"
 	"net/http"
@@ -22,7 +21,7 @@ func (h *AdminHandler) listMaskingTables(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	db, err := h.registry.Get(ctx, resource, authz.SchemaRead)
+	db, err := h.registry.Get(ctx, resource)
 	if err != nil {
 		respond(w, nil, err)
 		return
@@ -52,7 +51,7 @@ func (h *AdminHandler) maskingFields(r *http.Request, table string) ([]masking.F
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	db, err := h.registry.Get(ctx, resource, authz.SchemaRead)
+	db, err := h.registry.Get(ctx, resource)
 	if err != nil {
 		return nil, err
 	}

@@ -24,10 +24,8 @@ type ResourceDraft = {
   host: string
   port: number
   database_name: string
-  read_username: string
-  read_secret_ref: string
-  write_username: string
-  write_secret_ref: string
+  username: string
+  secret_ref: string
   tls_mode: string
   max_rows: number
   max_write_rows: number
@@ -51,10 +49,8 @@ const newResourceDraft = (): ResourceDraft => ({
   host: '',
   port: 3306,
   database_name: '',
-  read_username: '',
-  read_secret_ref: '',
-  write_username: '',
-  write_secret_ref: '',
+  username: '',
+  secret_ref: '',
   tls_mode: 'required',
   max_rows: 1000,
   max_write_rows: 100,
@@ -315,18 +311,13 @@ function Resources({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ResourceDraft>(newResourceDraft())
   const paged = useClientPagination(resources, query, (resource, normalizedQuery) =>
-    [resource.resource_key, resource.display_name, resource.host, resource.database_name, resource.read_username].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    [resource.resource_key, resource.display_name, resource.host, resource.database_name, resource.username].some((value) => value.toLowerCase().includes(normalizedQuery)),
   )
 
   async function save(event: FormEvent) {
     event.preventDefault()
-    const payload = {
-      ...draft,
-      write_username: draft.write_username || null,
-      write_secret_ref: draft.write_secret_ref || null,
-    }
     try {
-      await api(editingId ? `/api/v1/admin/resources/${editingId}` : '/api/v1/admin/resources', { method: editingId ? 'PATCH' : 'POST', body: JSON.stringify(payload) })
+      await api(editingId ? `/api/v1/admin/resources/${editingId}` : '/api/v1/admin/resources', { method: editingId ? 'PATCH' : 'POST', body: JSON.stringify(draft) })
       closeEditor()
       await refresh()
     } catch (error) {
@@ -357,10 +348,8 @@ function Resources({
       host: resource.host,
       port: resource.port,
       database_name: resource.database_name,
-      read_username: resource.read_username,
-      read_secret_ref: resource.read_secret_ref,
-      write_username: resource.write_username ?? '',
-      write_secret_ref: resource.write_secret_ref ?? '',
+      username: resource.username,
+      secret_ref: resource.secret_ref,
       tls_mode: resource.tls_mode,
       max_rows: resource.max_rows,
       max_write_rows: resource.max_write_rows,
@@ -384,13 +373,13 @@ function Resources({
         <div className="tableScroll">
           <table>
             <caption className="visuallyHidden">数据库资源列表</caption>
-            <thead><tr><th>资源</th><th>目标</th><th>只读账号</th><th>限制</th><th>状态</th><th>操作</th></tr></thead>
+		    <thead><tr><th>资源</th><th>目标</th><th>连接账号</th><th>限制</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               {paged.rows.length ? paged.rows.map((resource) => (
                 <tr key={resource.id}>
                   <td><strong>{resource.display_name || resource.resource_key}</strong><small><code>{resource.resource_key}</code></small></td>
                   <td><code>{resource.host}:{resource.port}</code><small>{resource.database_name}</small></td>
-                  <td><strong>{resource.read_username}</strong><small>TLS：{resource.tls_mode}</small></td>
+				  <td><strong>{resource.username}</strong><small>TLS：{resource.tls_mode}</small></td>
                   <td>{resource.max_rows} 行<small>{resource.statement_timeout_ms} ms</small></td>
                   <td><Status value={resource.enabled ? 'enabled' : 'disabled'} /></td>
                   <td><div className="rowActions"><button className="tableButton" type="button" onClick={() => edit(resource)}>编辑</button><button className="tableButton" type="button" onClick={() => void test(resource)}>测试连接</button></div></td>
@@ -415,12 +404,8 @@ function Resources({
             </div>
             <label htmlFor="resource-database">Database<input id="resource-database" name="database_name" value={draft.database_name} onChange={(event) => setDraft({ ...draft, database_name: event.target.value })} autoComplete="off" required placeholder="doc_ai" /></label>
             <div className="fieldGrid">
-              <label htmlFor="resource-read-user">只读账号<input id="resource-read-user" name="read_username" value={draft.read_username} onChange={(event) => setDraft({ ...draft, read_username: event.target.value })} autoComplete="off" required /></label>
-              <label htmlFor="resource-read-secret">Read secret ref<input id="resource-read-secret" name="read_secret_ref" value={draft.read_secret_ref} onChange={(event) => setDraft({ ...draft, read_secret_ref: event.target.value })} autoComplete="off" required /></label>
-            </div>
-            <div className="fieldGrid">
-              <label htmlFor="resource-write-user">写账号（可选）<input id="resource-write-user" name="write_username" value={draft.write_username} onChange={(event) => setDraft({ ...draft, write_username: event.target.value })} autoComplete="off" /></label>
-              <label htmlFor="resource-write-secret">Write secret ref（可选）<input id="resource-write-secret" name="write_secret_ref" value={draft.write_secret_ref} onChange={(event) => setDraft({ ...draft, write_secret_ref: event.target.value })} autoComplete="off" /></label>
+              <label htmlFor="resource-username">连接账号<input id="resource-username" name="username" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} autoComplete="off" required /></label>
+              <label htmlFor="resource-secret">Secret ref<input id="resource-secret" name="secret_ref" value={draft.secret_ref} onChange={(event) => setDraft({ ...draft, secret_ref: event.target.value })} autoComplete="off" required /></label>
             </div>
             <div className="fieldGrid fieldGridThree">
               <label htmlFor="resource-tls">TLS<select id="resource-tls" name="tls_mode" value={draft.tls_mode} onChange={(event) => setDraft({ ...draft, tls_mode: event.target.value })}><option value="required">required</option><option value="preferred">preferred</option><option value="skip_verify">skip_verify</option><option value="disabled">disabled（不启用）</option></select></label>

@@ -26,7 +26,6 @@ const (
 type ConnectionConfig struct {
 	ResourceID   string
 	Version      uint64
-	Mode         string
 	Host         string
 	Port         uint16
 	Database     string

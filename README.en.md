@@ -16,7 +16,7 @@ Administrators register database resources and grant access by **principal × re
 Giving an AI/MCP client a direct database connection makes credential leakage, excessive permissions, unsafe SQL, and missing audit trails easy to create. DB Access Gateway separates the system into three planes:
 
 - Control plane: users, resources, grants, tokens, masking rules, and audit records;
-- Data plane: controlled read-only and read-write database accounts execute queries;
+- Data plane: one credential set per resource connects to Target MySQL; Gateway authorization controls read and write actions;
 - Protocol plane: a Streamable HTTP MCP endpoint exposes a small set of database tools.
 
 Clients submit only a logical `resource_key`. They cannot submit a host, DSN, username, or password.
@@ -29,7 +29,7 @@ Clients submit only a logical `resource_key`. They cannot submit a host, DSN, us
 - Default-deny resource RBAC: `query_write ⊇ query_read ⊇ schema_read`;
 - MySQL single-statement AST guard for controlled `SELECT`, `INSERT`, `UPDATE`, and `DELETE`;
 - Rejects DDL, multiple statements, cross-database access, system schemas, locking reads, dangerous functions, and UPDATE/DELETE without `WHERE`;
-- Separate read and write database accounts and connection pools;
+- Separate read and write authorization paths in Gateway, sharing the resource connection pool;
 - Row, result-size, statement-timeout, and write-affected-row limits;
 - Re-checks principal status, grants, and resource versions before returning results or committing writes;
 - Audit records contain SQL text and a SHA-256 fingerprint, but not parameter values, results, or database passwords;
@@ -46,9 +46,8 @@ flowchart LR
     MCP[MCP client] -->|Personal Access Token| Gateway
     Gateway --> Control[(Control MySQL)]
     Gateway --> Policy[Authorization and SQL Guard]
-    Policy --> Registry[Target Registry<br/>read/write pools]
-    Registry -->|Read account| Target[(Target MySQL)]
-    Registry -->|Write account| Target
+    Policy --> Registry[Target Registry<br/>resource pools]
+    Registry -->|One credential set| Target[(Target MySQL)]
     Gateway --> Audit[Audit records]
     Control --- Audit
 ```
@@ -58,7 +57,7 @@ The `query_sql` request path is:
 1. Resolve the personal token and verify that the principal is active;
 2. Load the resource and effective grants, merging the strictest row, timeout, and reason constraints;
 3. Parse the SQL and reject statements outside the allowlist;
-4. Select the read or write database account;
+4. Check the `schema_read`, `query_read`, or `query_write` grant for the SQL action and obtain the resource pool;
 5. Execute the query and re-check authorization before returning rows or committing a write transaction;
 6. Update the final audit status.
 
@@ -74,7 +73,7 @@ Authorization is default-deny. When multiple grants apply, `require_reason` is c
 
 ## Quick start: connect an existing MySQL
 
-This project does not create or store business databases. Prepare an existing MySQL reachable by the Gateway, together with separate read-only and read-write accounts, then start only the control database and Gateway:
+This project does not create or store business databases. Prepare an existing MySQL reachable by the Gateway, together with one existing connection account, then start only the control database and Gateway:
 
 ```bash
 cp .env.example .env
@@ -89,7 +88,7 @@ Username: admin
 Password: admin_123
 ```
 
-Change the administrator password immediately. In the administration console, register the existing MySQL host, port, database name, read account, and write account, then test the connection. Create ordinary users, grants, and personal MCP tokens afterward.
+Change the administrator password immediately. In the administration console, register the existing MySQL host, port, database name, connection account, and secret reference, then test the connection. Create ordinary users, grants, and personal MCP tokens afterward.
 
 ## Production deployment: single instance, private network, persistent data
 
@@ -111,7 +110,7 @@ chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-Replace the Control MySQL and Gateway placeholders in `.env.prod`. Put the password for each existing target-MySQL account in `.env.gateway-secrets.prod`, using names that match the resource secret references, then validate and start the stack:
+Replace the Control MySQL and Gateway placeholders in `.env.prod`. Put the password for each target resource's connection account in `.env.gateway-secrets.prod`, using names that match the resource secret references, then validate and start the stack:
 
 ```bash
 docker compose \
@@ -136,44 +135,34 @@ curl http://127.0.0.1:8080/readyz
 
 ### Configure an existing target database
 
-The Gateway does not create business databases, tables, or migrate business data. Before enabling a resource, a database administrator should provision least-privilege accounts on the existing target MySQL. If the accounts already exist, use them directly:
-
-```sql
-CREATE USER 'gateway_read'@'%' IDENTIFIED BY '<read-only password>';
-GRANT SELECT, SHOW VIEW ON appdb.* TO 'gateway_read'@'%';
-
-CREATE USER 'gateway_write'@'%' IDENTIFIED BY '<read-write password>';
-GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%';
-```
-
-Restrict `'%'` to the gateway's controlled network range in production. A resource can use:
+The Gateway does not create business databases, tables, or migrate business data. It also does not require dedicated read-only and read-write MySQL accounts. Use one existing account for the target instance; Gateway grants and the SQL guard control which users can read or write. A resource can use:
 
 ```text
 Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
-Read username:    gateway_read
-Read secret ref:  app_prod_read
-Write username:   gateway_write
-Write secret ref: app_prod_write
+Username:         app_gateway
+Secret ref:       app_prod
 TLS mode:         required (when TLS is configured on Target MySQL)
 ```
+
+The account must have the underlying MySQL privileges required by the business operation. Gateway `query_read` and `query_write` grants decide which Gateway user may perform an action; they do not elevate a database account that is read-only.
 
 The resource references above map to `.env.gateway-secrets.prod`:
 
 ```dotenv
-DB_SECRET_APP_PROD_READ=<app read-account password>
-DB_SECRET_APP_PROD_WRITE=<app read-write-account password>
+DB_SECRET_APP_PROD=<app connection-account password>
 ```
 
-Use another pair for another target database without changing the Control MySQL schema:
+Use another entry for another target database without changing the Control MySQL schema:
 
 ```dotenv
-DB_SECRET_ORDERS_PROD_READ=<orders read-account password>
-DB_SECRET_ORDERS_PROD_WRITE=<orders read-write-account password>
+DB_SECRET_ORDERS_PROD=<orders connection-account password>
 ```
 
-For example, `read_secret_ref=orders_prod_read` resolves to `DB_SECRET_ORDERS_PROD_READ`. The secret file is injected only into the Gateway, is never returned by the API, and is not stored in Control MySQL.
+For example, `secret_ref=orders_prod` resolves to `DB_SECRET_ORDERS_PROD`. The secret file is injected only into the Gateway, is never returned by the API, and is not stored in Control MySQL. Whether a user can read or write is controlled by the Gateway's `query_read` or `query_write` grant.
+
+When upgrading from an older version, the Control MySQL migration prefers the old write credential when one was configured; otherwise it migrates the old read credential as the unified account. After upgrading, confirm that the secret references still exist and test each resource connection.
 
 The Gateway applies control-database migrations on first startup. Change `admin / admin_123` before allowing internal users to access the service. Plain `docker compose down` preserves `control-data`; never use `docker compose down -v` in production. Business-data persistence and backups remain the responsibility of the existing target MySQL.
 
@@ -232,7 +221,7 @@ Do not rotate `TOKEN_PEPPER` casually. The current implementation uses it to der
 
 ## Security boundaries and limitations
 
-The current defenses include default-deny authorization, separate read/write accounts, SQL AST validation, result/timeout/write limits, audit records, and field masking. See [docs/security.md](docs/security.md) for the full checklist.
+The current defenses include default-deny authorization, Gateway-level read/write action controls, SQL AST validation, result/timeout/write limits, audit records, and field masking. See [docs/security.md](docs/security.md) for the full checklist.
 
 Known boundaries:
 

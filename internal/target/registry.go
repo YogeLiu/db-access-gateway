@@ -1,7 +1,7 @@
 // Portions of this file are derived from GoNavi's internal/app/app.go database
 // cache at commit 60ea586c674259d4214ad7d7e75dddfa706e577a.
 // Copyright 2026 Syngnat. Licensed under Apache-2.0.
-// Modified for DB Access Gateway: resource-version/read-write cache identity,
+// Modified for DB Access Gateway: resource-version/connection cache identity,
 // generation-based flight invalidation, and a MySQL-only adapter factory.
 package target
 
@@ -19,7 +19,6 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/yogel/db-access-gateway/internal/authz"
 	"github.com/yogel/db-access-gateway/internal/control"
 )
 
@@ -35,7 +34,6 @@ type cachedDatabase struct {
 	lastPing   time.Time
 	resourceID string
 	version    uint64
-	mode       string
 }
 
 type Registry struct {
@@ -55,8 +53,8 @@ func NewRegistry() *Registry {
 	}
 }
 
-func (r *Registry) Get(ctx context.Context, resource control.Resource, action authz.Action) (*sql.DB, error) {
-	config, err := connectionConfig(resource, action)
+func (r *Registry) Get(ctx context.Context, resource control.Resource) (*sql.DB, error) {
+	config, err := connectionConfig(resource)
 	if err != nil {
 		return nil, err
 	}
@@ -71,24 +69,18 @@ func (r *Registry) Get(ctx context.Context, resource control.Resource, action au
 	return pool, nil
 }
 
-func connectionConfig(resource control.Resource, action authz.Action) (ConnectionConfig, error) {
-	mode := "read"
-	username, secretRef := resource.ReadUsername, resource.ReadSecretRef
-	if action == authz.QueryWrite {
-		mode = "write"
-		if resource.WriteUsername == nil || resource.WriteSecretRef == nil || strings.TrimSpace(*resource.WriteUsername) == "" || strings.TrimSpace(*resource.WriteSecretRef) == "" {
-			return ConnectionConfig{}, errors.New("write credential is not configured for resource")
-		}
-		username, secretRef = *resource.WriteUsername, *resource.WriteSecretRef
+func connectionConfig(resource control.Resource) (ConnectionConfig, error) {
+	if strings.TrimSpace(resource.Username) == "" || strings.TrimSpace(resource.SecretRef) == "" {
+		return ConnectionConfig{}, errors.New("database credential is not configured for resource")
 	}
-	password, err := resolveSecret(secretRef)
+	password, err := resolveSecret(resource.SecretRef)
 	if err != nil {
 		return ConnectionConfig{}, err
 	}
 	return ConnectionConfig{
-		ResourceID: resource.ID, Version: resource.Version, Mode: mode,
+		ResourceID: resource.ID, Version: resource.Version,
 		Host: resource.Host, Port: resource.Port, Database: resource.DatabaseName,
-		User: username, Password: password, TLSMode: resource.TLSMode,
+		User: resource.Username, Password: password, TLSMode: resource.TLSMode,
 		DialTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second,
 	}, nil
 }
@@ -215,7 +207,7 @@ func (r *Registry) connectAndCache(ctx context.Context, config ConnectionConfig,
 		_ = instance.Close()
 		return existing.inst, nil
 	}
-	r.cache[key] = cachedDatabase{inst: instance, lastPing: time.Now(), resourceID: config.ResourceID, version: config.Version, mode: config.Mode}
+	r.cache[key] = cachedDatabase{inst: instance, lastPing: time.Now(), resourceID: config.ResourceID, version: config.Version}
 	r.mu.Unlock()
 	return instance, nil
 }

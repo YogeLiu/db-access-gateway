@@ -155,26 +155,24 @@ func (h *AdminHandler) listResources(w http.ResponseWriter, r *http.Request) {
 }
 
 type resourceRequest struct {
-	ResourceKey        string  `json:"resource_key"`
-	DisplayName        string  `json:"display_name"`
-	Host               string  `json:"host"`
-	Port               uint16  `json:"port"`
-	DatabaseName       string  `json:"database_name"`
-	ReadUsername       string  `json:"read_username"`
-	ReadSecretRef      string  `json:"read_secret_ref"`
-	WriteUsername      *string `json:"write_username"`
-	WriteSecretRef     *string `json:"write_secret_ref"`
-	TLSMode            string  `json:"tls_mode"`
-	MaxRows            uint32  `json:"max_rows"`
-	MaxWriteRows       uint32  `json:"max_write_rows"`
-	StatementTimeoutMS uint32  `json:"statement_timeout_ms"`
-	Enabled            bool    `json:"enabled"`
-	Version            uint64  `json:"version"`
+	ResourceKey        string `json:"resource_key"`
+	DisplayName        string `json:"display_name"`
+	Host               string `json:"host"`
+	Port               uint16 `json:"port"`
+	DatabaseName       string `json:"database_name"`
+	Username           string `json:"username"`
+	SecretRef          string `json:"secret_ref"`
+	TLSMode            string `json:"tls_mode"`
+	MaxRows            uint32 `json:"max_rows"`
+	MaxWriteRows       uint32 `json:"max_write_rows"`
+	StatementTimeoutMS uint32 `json:"statement_timeout_ms"`
+	Enabled            bool   `json:"enabled"`
+	Version            uint64 `json:"version"`
 }
 
 func validateResource(body resourceRequest) (control.Resource, error) {
-	if strings.TrimSpace(body.ResourceKey) == "" || strings.TrimSpace(body.Host) == "" || strings.TrimSpace(body.DatabaseName) == "" || strings.TrimSpace(body.ReadUsername) == "" || strings.TrimSpace(body.ReadSecretRef) == "" {
-		return control.Resource{}, errors.New("resource_key, host, database_name, read_username and read_secret_ref are required")
+	if strings.TrimSpace(body.ResourceKey) == "" || strings.TrimSpace(body.Host) == "" || strings.TrimSpace(body.DatabaseName) == "" || strings.TrimSpace(body.Username) == "" || strings.TrimSpace(body.SecretRef) == "" {
+		return control.Resource{}, errors.New("resource_key, host, database_name, username and secret_ref are required")
 	}
 	if body.Port == 0 {
 		body.Port = 3306
@@ -204,23 +202,7 @@ func validateResource(body resourceRequest) (control.Resource, error) {
 	if !validTLS {
 		return control.Resource{}, errors.New("invalid tls_mode")
 	}
-	writeUsername := trimOptional(body.WriteUsername)
-	writeSecretRef := trimOptional(body.WriteSecretRef)
-	if (writeUsername == nil) != (writeSecretRef == nil) {
-		return control.Resource{}, errors.New("write_username and write_secret_ref must be configured together")
-	}
-	return control.Resource{ResourceKey: strings.TrimSpace(body.ResourceKey), DisplayName: strings.TrimSpace(body.DisplayName), Host: strings.TrimSpace(body.Host), Port: body.Port, DatabaseName: strings.TrimSpace(body.DatabaseName), ReadUsername: strings.TrimSpace(body.ReadUsername), ReadSecretRef: strings.TrimSpace(body.ReadSecretRef), WriteUsername: writeUsername, WriteSecretRef: writeSecretRef, TLSMode: body.TLSMode, MaxRows: body.MaxRows, MaxWriteRows: body.MaxWriteRows, StatementTimeoutMS: body.StatementTimeoutMS, Enabled: body.Enabled, Version: body.Version}, nil
-}
-
-func trimOptional(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	trimmed := strings.TrimSpace(*value)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
+	return control.Resource{ResourceKey: strings.TrimSpace(body.ResourceKey), DisplayName: strings.TrimSpace(body.DisplayName), Host: strings.TrimSpace(body.Host), Port: body.Port, DatabaseName: strings.TrimSpace(body.DatabaseName), Username: strings.TrimSpace(body.Username), SecretRef: strings.TrimSpace(body.SecretRef), TLSMode: body.TLSMode, MaxRows: body.MaxRows, MaxWriteRows: body.MaxWriteRows, StatementTimeoutMS: body.StatementTimeoutMS, Enabled: body.Enabled, Version: body.Version}, nil
 }
 
 func (h *AdminHandler) createResource(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +254,7 @@ func (h *AdminHandler) testResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.registry.Invalidate(resource.ID)
-	db, err := h.registry.Get(r.Context(), resource, authz.SchemaRead)
+	db, err := h.registry.Get(r.Context(), resource)
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()

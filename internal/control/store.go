@@ -251,23 +251,16 @@ func (s *Store) ListResources(ctx context.Context) ([]Resource, error) {
 }
 
 const resourceSelect = `SELECT id, resource_key, display_name, host, port, database_name,
-	read_username, read_secret_ref, write_username, write_secret_ref, tls_mode, max_rows, max_write_rows,
+	username, secret_ref, tls_mode, max_rows, max_write_rows,
 	statement_timeout_ms, enabled, version, created_at, updated_at FROM database_resources`
 
 type scanner interface{ Scan(...any) error }
 
 func scanResource(row scanner) (Resource, error) {
 	var r Resource
-	var writeUser, writeSecret sql.NullString
 	err := row.Scan(&r.ID, &r.ResourceKey, &r.DisplayName, &r.Host, &r.Port, &r.DatabaseName,
-		&r.ReadUsername, &r.ReadSecretRef, &writeUser, &writeSecret, &r.TLSMode, &r.MaxRows, &r.MaxWriteRows,
+		&r.Username, &r.SecretRef, &r.TLSMode, &r.MaxRows, &r.MaxWriteRows,
 		&r.StatementTimeoutMS, &r.Enabled, &r.Version, &r.CreatedAt, &r.UpdatedAt)
-	if writeUser.Valid {
-		r.WriteUsername = &writeUser.String
-	}
-	if writeSecret.Valid {
-		r.WriteSecretRef = &writeSecret.String
-	}
 	return r, err
 }
 
@@ -282,10 +275,10 @@ func (s *Store) GetResource(ctx context.Context, resourceID string) (Resource, e
 func (s *Store) CreateResource(ctx context.Context, r Resource) (Resource, error) {
 	r.ID = id.New()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO database_resources
-		(id, resource_key, display_name, host, port, database_name, read_username, read_secret_ref,
-		 write_username, write_secret_ref, tls_mode, max_rows, max_write_rows, statement_timeout_ms, enabled)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ResourceKey, r.DisplayName, r.Host, r.Port,
-		r.DatabaseName, r.ReadUsername, r.ReadSecretRef, r.WriteUsername, r.WriteSecretRef,
+		(id, resource_key, display_name, host, port, database_name, username, secret_ref,
+		 tls_mode, max_rows, max_write_rows, statement_timeout_ms, enabled)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ResourceKey, r.DisplayName, r.Host, r.Port,
+		r.DatabaseName, r.Username, r.SecretRef,
 		r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled)
 	if err != nil {
 		return Resource{}, err
@@ -295,9 +288,9 @@ func (s *Store) CreateResource(ctx context.Context, r Resource) (Resource, error
 
 func (s *Store) UpdateResource(ctx context.Context, r Resource, expectedVersion uint64) (Resource, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE database_resources SET display_name=?, host=?, port=?, database_name=?,
-		read_username=?, read_secret_ref=?, write_username=?, write_secret_ref=?, tls_mode=?, max_rows=?,
+		username=?, secret_ref=?, tls_mode=?, max_rows=?,
 		max_write_rows=?, statement_timeout_ms=?, enabled=?, version=version+1 WHERE id=? AND version=?`, r.DisplayName,
-		r.Host, r.Port, r.DatabaseName, r.ReadUsername, r.ReadSecretRef, r.WriteUsername, r.WriteSecretRef,
+		r.Host, r.Port, r.DatabaseName, r.Username, r.SecretRef,
 		r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled, r.ID, expectedVersion)
 	if err != nil {
 		return Resource{}, err

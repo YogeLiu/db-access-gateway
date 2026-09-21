@@ -16,7 +16,7 @@
 直接把数据库连接交给 AI/MCP 客户端，会带来凭据泄露、权限过大、审计缺失和危险 SQL 等问题。DB Access Gateway 将访问拆成三层：
 
 - 控制面：管理用户、资源、授权、Token、脱敏规则和审计记录；
-- 数据面：使用受控的只读/读写数据库账号执行查询；
+- 数据面：使用每个资源的一套数据库凭据连接目标 MySQL，读写动作由 Gateway 权限控制；
 - 协议面：通过 Streamable HTTP MCP 暴露有限的数据库工具。
 
 客户端只提交逻辑资源名 `resource_key`，不能提交主机、DSN、用户名或密码。
@@ -29,7 +29,7 @@
 - 默认拒绝的资源级 RBAC：`query_write ⊇ query_read ⊇ schema_read`；
 - MySQL 单语句 AST 守卫，只允许受控的 `SELECT`、`INSERT`、`UPDATE`、`DELETE`；
 - 拒绝 DDL、多语句、跨库、系统库、锁定读取、危险函数和无 `WHERE` 的更新/删除；
-- 读写数据库账号和连接池隔离；
+- 读写动作在 Gateway 内部分离授权，并共用资源连接池；
 - 行数、结果大小、语句超时和写入影响行数限制；
 - 授权、资源版本和用户状态在执行前后复核，写事务提交前再次校验；
 - 保存 SQL 文本和 SHA-256 指纹的审计记录，不保存参数值、结果或数据库密码；
@@ -46,9 +46,8 @@ flowchart LR
     MCP[MCP 客户端] -->|个人 Access Token| Gateway
     Gateway --> Control[(Control MySQL)]
     Gateway --> Policy[授权与 SQL Guard]
-    Policy --> Registry[Target Registry<br/>读写连接池]
-    Registry -->|只读账号| Target[(Target MySQL)]
-    Registry -->|读写账号| Target
+    Policy --> Registry[Target Registry<br/>资源连接池]
+    Registry -->|单套连接凭据| Target[(Target MySQL)]
     Gateway --> Audit[审计记录]
     Control --- Audit
 ```
@@ -58,7 +57,7 @@ flowchart LR
 1. 用个人 Token 查找用户并确认账号仍处于启用状态；
 2. 查询资源和有效授权，合并最严格的行数、超时和原因约束；
 3. 解析 SQL，拒绝不符合白名单的语句；
-4. 根据动作选择只读或读写账号；
+4. 根据 SQL 动作检查 `schema_read`、`query_read` 或 `query_write` 授权，并获取资源连接池；
 5. 执行查询，并在返回结果或提交写事务前重新检查授权；
 6. 更新最终审计状态。
 
@@ -74,7 +73,7 @@ flowchart LR
 
 ## 快速开始：连接已有 MySQL
 
-本项目不会创建或保存业务数据库。你需要先准备一个 Gateway 能访问的已有 MySQL，并准备只读/读写账号；然后只启动控制库和 Gateway：
+本项目不会创建或保存业务数据库。你需要先准备一个 Gateway 能访问的已有 MySQL，以及一套已有的连接账号；然后只启动控制库和 Gateway：
 
 ```bash
 cp .env.example .env
@@ -89,7 +88,7 @@ docker compose up --build -d
 密码：admin_123
 ```
 
-首次登录后立即修改管理员密码。在管理台创建资源时填写已有 MySQL 的 Host、端口、数据库名、读账号和写账号，然后执行连接测试。接着创建普通用户、授权和个人 MCP Token。
+首次登录后立即修改管理员密码。在管理台创建资源时填写已有 MySQL 的 Host、端口、数据库名、连接账号和 Secret 引用，然后执行连接测试。接着创建普通用户、授权和个人 MCP Token。
 
 ## 生产部署：单实例、内网、持久化
 
@@ -111,7 +110,7 @@ chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-将 `.env.prod` 中 Control MySQL 和 Gateway 的占位值替换；将每个已有目标 MySQL 账号的密码写入 `.env.gateway-secrets.prod`，变量名必须与资源的 Secret 引用匹配，然后启动：
+将 `.env.prod` 中 Control MySQL 和 Gateway 的占位值替换；将每个目标资源连接账号的密码写入 `.env.gateway-secrets.prod`，变量名必须与资源的 Secret 引用匹配，然后启动：
 
 ```bash
 docker compose \
@@ -136,44 +135,34 @@ curl http://127.0.0.1:8080/readyz
 
 ### 配置已有目标数据库
 
-Gateway 不会创建业务数据库、表或迁移业务数据。启用资源前，由数据库管理员在已有目标 MySQL 中准备最小权限账号；如果账号已经存在，直接使用现有账号即可：
-
-```sql
-CREATE USER 'gateway_read'@'%' IDENTIFIED BY '<只读密码>';
-GRANT SELECT, SHOW VIEW ON appdb.* TO 'gateway_read'@'%';
-
-CREATE USER 'gateway_write'@'%' IDENTIFIED BY '<读写密码>';
-GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%';
-```
-
-生产环境应将 `'%'` 收紧为网关所在的受控网络范围。管理台资源配置示例：
+Gateway 不会创建业务数据库、表或迁移业务数据，也不会要求为网关专门创建只读/读写账号。使用已有 MySQL 账号连接目标实例；读写权限由 Gateway 的用户授权和 SQL 守卫控制。管理台资源配置示例：
 
 ```text
 Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
-Read username:    gateway_read
-Read secret ref:  app_prod_read
-Write username:   gateway_write
-Write secret ref: app_prod_write
+Username:         app_gateway
+Secret ref:       app_prod
 TLS mode:         required（目标 MySQL 已配置 TLS 时）
 ```
+
+该账号在目标 MySQL 中必须具备实际业务操作所需的底层权限；Gateway 的 `query_read` / `query_write` 授权只决定哪个 Gateway 用户可以执行动作，不会把一个底层只读账号提升为可写账号。
 
 上面的资源引用对应 `.env.gateway-secrets.prod` 中的配置：
 
 ```dotenv
-DB_SECRET_APP_PROD_READ=<app 只读账号密码>
-DB_SECRET_APP_PROD_WRITE=<app 读写账号密码>
+DB_SECRET_APP_PROD=<app 连接账号密码>
 ```
 
 第二个目标库可以使用另一组引用，不需要改 Control MySQL 表结构：
 
 ```dotenv
-DB_SECRET_ORDERS_PROD_READ=<orders 只读账号密码>
-DB_SECRET_ORDERS_PROD_WRITE=<orders 读写账号密码>
+DB_SECRET_ORDERS_PROD=<orders 连接账号密码>
 ```
 
-例如资源的 `read_secret_ref=orders_prod_read` 会解析为 `DB_SECRET_ORDERS_PROD_READ`。Secret 文件只注入 Gateway，不会通过 API 返回，也不会保存到 Control MySQL。
+例如资源的 `secret_ref=orders_prod` 会解析为 `DB_SECRET_ORDERS_PROD`。Secret 文件只注入 Gateway，不会通过 API 返回，也不会保存到 Control MySQL。用户是否可以读写，取决于其在 Gateway 中获得的 `query_read` 或 `query_write` 授权。
+
+从旧版本升级时，控制库迁移会把旧资源的写账号（如果配置过）优先迁移为统一账号，否则迁移旧读账号。升级后请确认 Secret 文件中的引用仍然存在，并逐个测试资源连接。
 
 控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除 `control-data`；生产环境不要执行 `docker compose down -v`。业务数据由现有目标 MySQL 负责持久化和备份。
 
@@ -232,7 +221,7 @@ MCP 客户端必须使用普通用户自己的 Token，不要使用 `ADMIN_TOKEN
 
 ## 安全边界与当前限制
 
-已有防线包括：默认拒绝授权、读写账号隔离、SQL AST 守卫、结果/超时/写入限制、审计和字段脱敏。完整说明见 [docs/security.md](docs/security.md)。
+已有防线包括：默认拒绝授权、Gateway 读写动作控制、SQL AST 守卫、结果/超时/写入限制、审计和字段脱敏。完整说明见 [docs/security.md](docs/security.md)。
 
 当前版本仍有明确边界：
 

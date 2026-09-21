@@ -112,4 +112,19 @@ var migrations = []string{
 	`ALTER TABLE masking_rules ADD COLUMN keep_prefix INT NOT NULL DEFAULT 1,
  ADD COLUMN keep_suffix INT NOT NULL DEFAULT 1`,
 	`ALTER TABLE api_tokens ADD COLUMN token_ciphertext BLOB NULL`,
+	`ALTER TABLE database_resources
+		ADD COLUMN username VARCHAR(128) NULL AFTER database_name,
+		ADD COLUMN secret_ref VARCHAR(128) NULL AFTER username`,
+	`UPDATE database_resources
+		SET username=COALESCE(NULLIF(write_username, ''), read_username),
+			secret_ref=COALESCE(NULLIF(write_secret_ref, ''), read_secret_ref)
+		WHERE username IS NULL`,
+	`ALTER TABLE database_resources
+		MODIFY username VARCHAR(128) NOT NULL,
+		MODIFY secret_ref VARCHAR(128) NOT NULL`,
+	`ALTER TABLE database_resources
+		DROP COLUMN read_username,
+		DROP COLUMN read_secret_ref,
+		DROP COLUMN write_username,
+		DROP COLUMN write_secret_ref`,
 }

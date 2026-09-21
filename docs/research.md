@@ -16,9 +16,9 @@
 
 移植后保留的网关差异：
 
-- 缓存身份从桌面连接配置改为 `resource_id + version + read/write + 连接配置哈希`。
+- 缓存身份从桌面连接配置改为 `resource_id + version + 连接配置哈希`。
 - 更新资源会递增连接代际；更新前发起、更新后才成功的旧连接不能重新写回缓存。
-- 读写分别解析 Secret 和创建 pool，防止 `query_read` 意外复用写账号。
+- 每个资源只解析一套 Secret 并复用同一个连接池；读写动作由 Gateway 授权和 SQL 守卫区分。
 - GoNavi 面向通用数据库客户端可启用多语句；本项目是 AI 网关，固定 `multiStatements=false`。
 - 删除 Wails、SSH、代理、多数据库驱动和桌面端保存连接依赖，只保留 MySQL 服务端所需子集。
 
@@ -49,7 +49,7 @@ flowchart TB
   MCP --> Policy["Identity + RBAC + SQL guard"]
   API --> Control[("Control MySQL")]
   Policy --> Control
-  Policy --> Pool["Versioned read/write pools"]
+  Policy --> Pool["Versioned resource pools"]
   Pool --> Target[("Target MySQL")]
   Policy --> Audit["Synchronous audit"]
   Audit --> Control
@@ -60,8 +60,8 @@ flowchart TB
 - MCP 客户端只提交 `resource_key`，不能提交 host、DSN、用户名或密码。
 - 控制面保存 Secret 引用，不保存目标库明文密码；运行时从环境/Secret 注入解析。
 - 查询权限在建连前检查；读取返回前、写入提交前再次检查。
-- 读池永远使用只读账号；写池只在动作被判定为 `query_write` 后打开。
-- 目标库权限即使误配，AST 守卫仍拒绝 DDL 和危险语句；AST 守卫即使出现缺陷，最小权限数据库账号仍限制破坏面。
+- 连接池使用资源配置的一套账号；只有动作被判定并授权为 `query_write` 后才执行写事务。
+- 目标库账号即使权限较宽，AST 守卫仍拒绝 DDL 和危险语句；Gateway 授权即使出现缺陷，目标账号的 schema 范围和数据库治理仍限制破坏面。
 
 ## 与目标需求的对应
 

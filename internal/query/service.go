@@ -66,7 +66,7 @@ func (s *Service) ListTables(ctx context.Context, principal control.Principal, r
 		return nil, err
 	}
 	_ = decision
-	db, err := s.registry.Get(ctx, resource, authz.SchemaRead)
+	db, err := s.registry.Get(ctx, resource)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func (s *Service) DescribeTable(ctx context.Context, principal control.Principal
 	if err != nil {
 		return nil, err
 	}
-	db, err := s.registry.Get(ctx, resource, authz.SchemaRead)
+	db, err := s.registry.Get(ctx, resource)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func (s *Service) Execute(ctx context.Context, principal control.Principal, reso
 		return Result{}, errors.New("this grant requires a reason")
 	}
 
-	db, err := s.registry.Get(ctx, resource, plan.Action)
+	db, err := s.registry.Get(ctx, resource)
 	if err != nil {
 		s.auditFailure(auditID, requestID, principal.ID, resource.ID, "query_sql", "FAILED", "target_unavailable", plan.Action, fingerprint, sqlText, reason, started)
 		return Result{}, err

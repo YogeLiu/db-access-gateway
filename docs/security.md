@@ -5,7 +5,7 @@
 1. 身份：控制台使用账号密码和 HttpOnly 会话 Cookie；密码使用 bcrypt 哈希保存。每个 MCP 用户使用随机 256-bit access token；控制库只存 `HMAC-SHA256(pepper, token)`，禁用账号或撤销令牌立即阻止新请求。
 2. 授权：资源和动作都必须匹配，默认拒绝。高层动作只向下包含，`query_read` 永远不能满足 `query_write`。
 3. SQL：MySQL AST 只允许一个 SELECT/INSERT/UPDATE/DELETE；DDL、锁、危险函数、多语句、跨库和系统库均拒绝。
-4. 凭据：客户端看不到数据库位置和凭据；只读与写账号分开，且 MySQL 本身再做一次最小权限校验。
+4. 凭据：客户端看不到数据库位置和凭据；每个资源使用一套受控连接凭据，读写动作由 Gateway 授权、SQL AST 守卫和资源限制共同控制。
 5. TOCTOU：资源带版本号；读结果返回前和写事务提交前重新读取当前策略。资源更新使旧连接池失效。
 6. 资源限制：最多 1000 行、1 MiB 结果、10 秒语句超时和最多 1000 行写影响量；部署值与授权值取最严格值。
 7. 审计：保存 SQL 文本和指纹，但不记录参数/结果。读取审计失败时不返回结果；同一 request 由控制台按最终状态展示。
@@ -24,7 +24,7 @@
 - [ ] HTTPS 终止、可信代理和管理/MCP 分域或分网
 - [ ] 修改默认 `admin/admin_123`，并配置强 Token Pepper 与目标数据库密码
 - [ ] 控制库账号只拥有自己的 schema 权限
-- [ ] 每个资源独立只读/写账号；写账号不拥有 DDL、FILE、PROCESS、SUPER 等权限
+- [ ] 每个资源使用独立、受控的目标库连接账号；账号只拥有业务 schema 所需权限，不拥有 DDL、FILE、PROCESS、SUPER 等额外权限
 - [ ] 目标 MySQL 使用 TLS `required`，避免 `skip_verify` 和 `disabled`
 - [ ] Secret Manager 注入和轮换演练
 - [ ] 管理端 SSO/MFA、速率限制与来源限制

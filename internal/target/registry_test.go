@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yogel/db-access-gateway/internal/control"
 )
 
 type fakeDatabase struct {
@@ -29,7 +31,7 @@ func (f *fakeDatabase) SQLDB() *sql.DB             { return nil }
 
 func testConfig() ConnectionConfig {
 	return ConnectionConfig{
-		ResourceID: "resource-a", Version: 1, Mode: "read", Host: "mysql", Port: 3306,
+		ResourceID: "resource-a", Version: 1, Host: "mysql", Port: 3306,
 		Database: "app", User: "reader", Password: "secret", TLSMode: "disabled", DialTimeout: time.Second,
 	}
 }
@@ -137,13 +139,16 @@ func TestRegistryInvalidationRejectsInflightConnection(t *testing.T) {
 	}
 }
 
-func TestRegistryUsesSeparateReadAndWriteCacheKeys(t *testing.T) {
-	read := testConfig()
-	write := read
-	write.Mode = "write"
-	write.User = "writer"
-	write.Password = "write-secret"
-	if getCacheKey(read) == getCacheKey(write) {
-		t.Fatal("read and write configurations must not share a cache key")
+func TestConnectionConfigUsesOneResourceCredential(t *testing.T) {
+	t.Setenv("DB_SECRET_APP_PROD", "secret")
+	config, err := connectionConfig(control.Resource{
+		ID: "resource-a", Version: 1, Host: "mysql", Port: 3306, DatabaseName: "app",
+		Username: "app_user", SecretRef: "app_prod", TLSMode: "disabled",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.User != "app_user" || config.Password != "secret" {
+		t.Fatalf("unexpected credential: user=%q password=%q", config.User, config.Password)
 	}
 }
