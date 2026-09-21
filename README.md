@@ -1,170 +1,148 @@
 # DB Access Gateway
 
-一个面向 AI/MCP 客户端的 MySQL 访问网关：管理员登记账号和逻辑数据库资源，再按 `账号 × 资源 × 动作` 授权。服务端持有数据库凭据，客户端只拿到个人访问令牌，不会接触 DSN 或密码。
+[![CI](https://github.com/YogeLiu/db-access-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/YogeLiu/db-access-gateway/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-本实现先对 [GoNavi](https://github.com/YogeLiu/GoNavi) 与 [db-mcp-gateway](https://github.com/developerz-ai/db-mcp-gateway) 做了代码级调研，再组合两者的长处。具体采用与取舍见 [docs/research.md](docs/research.md)。
+**中文** · [English](README.en.md)
 
-数据库连接层不是重新造轮子：`internal/target/database.go`、`registry.go` 直接移植并裁剪自 GoNavi 的 MySQL adapter、SQL pool 和 App 连接缓存。所有派生文件均标记来源与修改，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+一个面向 AI/MCP 客户端的 MySQL 访问网关。
 
-## 已实现
+管理员登记数据库资源，再按“用户 × 资源 × 动作”分配权限。网关持有真实数据库凭据，MCP 客户端只获得个人 Access Token，不会接触 DSN、主机或数据库密码。
 
-- Go 1.25 服务，使用官方 `modelcontextprotocol/go-sdk` 暴露 Streamable HTTP MCP `/mcp`
-- React + TypeScript 控制台：管理员/用户账号密码登录、角色工作区、用户自助 Access Token、数据库资源、授权矩阵、授权预演和审计查询
-- 管理员首次账号为 `admin / admin_123`，密码使用 bcrypt 哈希保存，管理员和用户都可以修改自己的密码（至少 8 个字符，最多 72 个字节）
-- 管理员注册和管理用户；用户只读查看自己的资源/授权，并自行创建、查看和撤销 MCP Access Token
-- 三层动作：`query_write ⊇ query_read ⊇ schema_read`，没有匹配授权时默认拒绝
-- MySQL 单语句 AST 守卫：只允许 `SELECT` 和获得写权限后的 `INSERT/UPDATE/DELETE`
-- 永久拒绝 DDL、多语句、跨库、系统库、锁定读取、危险函数、无 `WHERE` 的更新/删除
-- 读取与写入使用不同数据库账号；目标账号本身构成第二道权限边界
-- 行数、返回体、超时、写入影响行数限制；多条匹配授权按最严格值合并
-- 写入在事务提交前重新读取账号、资源版本和授权，授权已撤销则回滚
-- 审计记录保存 SQL 文本和 SHA-256 指纹，不保存参数值、结果或数据库密码；同一请求只展示最终状态
-- GoNavi 派生的 MySQL adapter、连接池、30 秒健康检查、坏连接剔除和 `singleflight` 并发建连合并
-- 网关扩展的资源版本、读写池隔离、更新期间在途旧连接失效和请求取消传递
+> 项目当前是一个可运行的首版，适合内网、单实例部署。公网或企业级部署前，请先阅读[安全边界与生产检查单](docs/security.md)。
 
-## 权限语义
+## 解决什么问题
 
-| 授权 | schema_read | query_read | query_write |
-|---|---:|---:|---:|
-| schema_read | 允许 | 拒绝 | 拒绝 |
-| query_read | 允许 | 允许 | 拒绝 |
-| query_write | 允许 | 允许 | 允许 |
+直接把数据库连接交给 AI/MCP 客户端，会带来凭据泄露、权限过大、审计缺失和危险 SQL 等问题。DB Access Gateway 将访问拆成三层：
 
-因此题目中的矩阵会得到：
+- 控制面：管理用户、资源、授权、Token、脱敏规则和审计记录；
+- 数据面：使用受控的只读/读写数据库账号执行查询；
+- 协议面：通过 Streamable HTTP MCP 暴露有限的数据库工具。
 
-| 请求 | 结果 |
-|---|---|
-| `user_a → database_a → SELECT` | 允许 |
-| `user_a → database_c → SELECT` | 拒绝（没有该资源授权） |
-| `user_c → database_c → INSERT/UPDATE/DELETE` | 允许 |
-| 只有 `query_read` 的用户执行 `INSERT` | 拒绝 |
+客户端只提交逻辑资源名 `resource_key`，不能提交主机、DSN、用户名或密码。
 
-## 一键启动演示
+## 主要特性
 
-需要 Docker Compose。以下命令会启动控制库、含三个演示数据库的目标 MySQL，以及网关：
+- Go 1.25 服务，使用官方 `modelcontextprotocol/go-sdk` 暴露 `/mcp`；
+- React + TypeScript 管理台，支持管理员和普通用户工作区；
+- 个人 MCP Access Token，可创建、查看、撤销和设置有效期；
+- 默认拒绝的资源级 RBAC：`query_write ⊇ query_read ⊇ schema_read`；
+- MySQL 单语句 AST 守卫，只允许受控的 `SELECT`、`INSERT`、`UPDATE`、`DELETE`；
+- 拒绝 DDL、多语句、跨库、系统库、锁定读取、危险函数和无 `WHERE` 的更新/删除；
+- 读写数据库账号和连接池隔离；
+- 行数、结果大小、语句超时和写入影响行数限制；
+- 授权、资源版本和用户状态在执行前后复核，写事务提交前再次校验；
+- 保存 SQL 文本和 SHA-256 指纹的审计记录，不保存参数值、结果或数据库密码；
+- 支持按资源、表和字段配置明文、部分脱敏和全脱敏规则；
+- 内置连接池健康检查、坏连接剔除、并发建连合并和请求取消传递。
+
+## 架构
+
+这是一个“模块化单体 + 控制面/数据面分离”的服务。管理台、REST API 和 MCP Handler 由同一个 Go 进程提供，控制库保存策略和状态，目标 MySQL 保存业务数据。
+
+```mermaid
+flowchart LR
+    Admin[管理员浏览器] -->|Session Cookie| Gateway[Go Gateway]
+    MCP[MCP 客户端] -->|个人 Access Token| Gateway
+    Gateway --> Control[(Control MySQL)]
+    Gateway --> Policy[授权与 SQL Guard]
+    Policy --> Registry[Target Registry<br/>读写连接池]
+    Registry -->|只读账号| Target[(Target MySQL)]
+    Registry -->|读写账号| Target
+    Gateway --> Audit[审计记录]
+    Control --- Audit
+```
+
+一次 `query_sql` 请求的大致流程：
+
+1. 用个人 Token 查找用户并确认账号仍处于启用状态；
+2. 查询资源和有效授权，合并最严格的行数、超时和原因约束；
+3. 解析 SQL，拒绝不符合白名单的语句；
+4. 根据动作选择只读或读写账号；
+5. 执行查询，并在返回结果或提交写事务前重新检查授权；
+6. 更新最终审计状态。
+
+## 权限模型
+
+| 授权 | `schema_read` | `query_read` | `query_write` |
+| --- | ---: | ---: | ---: |
+| `schema_read` | 允许 | 拒绝 | 拒绝 |
+| `query_read` | 允许 | 允许 | 拒绝 |
+| `query_write` | 允许 | 允许 | 允许 |
+
+没有匹配授权时默认拒绝。多个授权同时适用时，`require_reason` 取并集，行数和超时取更严格的限制。
+
+## 快速开始：演示环境
+
+需要 Docker Compose：
 
 ```bash
 docker compose up --build -d
 ```
 
-打开 `http://localhost:8080`，使用管理员账号登录：
+打开 <http://localhost:8080>，使用默认管理员登录：
 
 ```text
 账号：admin
 密码：admin_123
 ```
 
-首次登录后请在“安全设置”修改管理员密码。管理员可以在“用户管理”中注册用户账号、设置初始密码、停用账号或重置密码；普通用户登录后只能查看自己的资源和授权，并在“Access Token”中创建 MCP 令牌。
-
-`ADMIN_TOKEN` 仍保留为脚本和旧版 API 客户端的兼容认证入口，不用于控制台页面登录。
-
-也可以安装 `jq` 后生成题目中的完整授权矩阵和两个个人令牌：
+首次登录后立即修改管理员密码。也可以安装 `jq` 后执行演示引导脚本，创建用户、资源、授权和个人 Token：
 
 ```bash
 ./scripts/bootstrap-demo.sh
 ```
 
-脚本会输出 `USER_A_TOKEN` 和 `USER_C_TOKEN`，每个令牌仅在创建时出现一次。脚本用于全新数据卷；重复执行前请在管理台删除/更名资源，或用 `docker compose down -v` 清空演示数据。
-
-## 生产部署（单实例、内网、Docker Compose）
-
-当前仓库的 `docker-compose.yml` 是演示配置：包含演示目标库、演示初始化 SQL 和开发密码。生产环境不要直接使用它，也不要挂载 `deploy/target-init.sql`。
-
-在“单个网关实例、控制库和目标库都运行在 Compose、数据需要持久化、网关不对公网开放”的场景下，不需要修改 Go 或 React 业务代码。建议在仓库根目录另建 `docker-compose.prod.yml`，使用独立的生产环境变量文件：
-
-```yaml
-services:
-  control-mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${CONTROL_MYSQL_ROOT_PASSWORD:?missing}
-      MYSQL_DATABASE: gateway
-      MYSQL_USER: gateway
-      MYSQL_PASSWORD: ${CONTROL_MYSQL_PASSWORD:?missing}
-    volumes:
-      - control-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 3s
-      timeout: 3s
-      retries: 30
-
-  target-mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:?missing}
-    volumes:
-      - target-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 3s
-      timeout: 3s
-      retries: 30
-
-  gateway:
-    build: .
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      HTTP_ADDR: ":8080"
-      WEB_DIR: /app/web
-      CONTROL_DSN: "gateway:${CONTROL_MYSQL_PASSWORD}@tcp(control-mysql:3306)/gateway?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?missing}
-      TOKEN_PEPPER: ${TOKEN_PEPPER:?missing}
-      DB_SECRET_PROD_READ: ${TARGET_READ_PASSWORD:?missing}
-      DB_SECRET_PROD_WRITE: ${TARGET_WRITE_PASSWORD:?missing}
-    depends_on:
-      control-mysql:
-        condition: service_healthy
-      target-mysql:
-        condition: service_healthy
-
-volumes:
-  control-data:
-  target-data:
-```
-
-创建不纳入 Git 的 `.env.prod`，并限制文件权限：
-
-```dotenv
-CONTROL_MYSQL_ROOT_PASSWORD=<随机密码>
-CONTROL_MYSQL_PASSWORD=<随机密码>
-TARGET_MYSQL_ROOT_PASSWORD=<随机密码>
-TARGET_READ_PASSWORD=<目标库只读账号密码>
-TARGET_WRITE_PASSWORD=<目标库读写账号密码>
-ADMIN_TOKEN=<至少 20 个字符的随机字符串>
-TOKEN_PEPPER=<至少 32 个字符的随机字符串>
-```
-
-推荐使用 `openssl rand -hex 32` 生成随机值，并执行：
+脚本会输出 `USER_A_TOKEN` 和 `USER_C_TOKEN`；Token 只在创建时显示一次。演示数据使用全新的 Docker 卷，清空演示环境时才执行：
 
 ```bash
-chmod 600 .env.prod
-docker compose --env-file .env.prod -f docker-compose.prod.yml config
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+docker compose down -v
 ```
 
-验证网关：
+## 生产部署：单实例、内网、持久化
+
+生产环境不要直接使用演示用的 `docker-compose.yml`。仓库提供了独立的 [docker-compose.prod.yml](docker-compose.prod.yml) 和 [.env.prod.example](.env.prod.example)，满足以下拓扑：
+
+- 一个 Gateway 实例；
+- Control MySQL 和 Target MySQL 都运行在 Compose 中；
+- 数据保存到 `control-data` 和 `target-data` 命名卷；
+- MySQL 不发布宿主机端口；
+- Gateway 默认只绑定 `127.0.0.1:8080`，不直接对公网开放。
+
+准备环境变量：
+
+```bash
+cp .env.prod.example .env.prod
+chmod 600 .env.prod
+openssl rand -hex 32
+```
+
+将 `.env.prod` 中的占位值全部替换，然后启动：
+
+```bash
+docker compose \
+  --env-file .env.prod \
+  -f docker-compose.prod.yml \
+  config
+
+docker compose \
+  --env-file .env.prod \
+  -f docker-compose.prod.yml \
+  up -d --build
+```
+
+验证服务：
 
 ```bash
 curl http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/readyz
 ```
 
-`control-data` 和 `target-data` 是持久化命名卷。普通的 `docker compose down` 不会删除数据，但生产环境不要执行 `docker compose down -v`。持久化不等于备份，仍应定期执行 MySQL 备份并测试恢复。
+`readyz` 只检查 Control MySQL。目标库需要在管理台中单独执行连接测试。
 
-网关访问目标库时使用 Docker 服务名 `target-mysql`。在管理台创建资源时填写：
+### 配置目标数据库
 
-- Host：`target-mysql`
-- Port：`3306`
-- `read_secret_ref`：`prod_read`，对应 `DB_SECRET_PROD_READ`
-- `write_secret_ref`：`prod_write`，对应 `DB_SECRET_PROD_WRITE`
-- 目标库已配置 TLS 时使用 `tls_mode=required`
-
-`target-mysql` 只负责启动 MySQL，不会自动创建业务数据库和最小权限账号。启用资源前，请按实际业务库名称创建数据库及账号，例如：
+`target-mysql` 不会自动创建业务库和最小权限账号。启用资源前，根据实际业务库执行类似 SQL：
 
 ```sql
 CREATE DATABASE appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -176,19 +154,34 @@ CREATE USER 'gateway_write'@'%' IDENTIFIED BY '<读写密码>';
 GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%';
 ```
 
-实际部署时应将 `'%'` 收紧为网关所在的受控网络范围，并将账号密码分别放入 `TARGET_READ_PASSWORD`、`TARGET_WRITE_PASSWORD`。如果有多个资源或多组账号，在 Compose 环境中增加对应的 `DB_SECRET_<引用名>` 变量。
+生产环境应将 `'%'` 收紧为网关所在的受控网络范围。管理台资源配置示例：
 
-控制库会在网关首次启动时自动迁移。首次登录仍使用 `admin / admin_123`，必须在开放内网访问前修改管理员密码。管理台和 MCP 只绑定到 `127.0.0.1`；如需从内网其他机器访问，应绑定服务器私网 IP，并在防火墙中只允许内网网段。
+```text
+Host:             target-mysql
+Port:             3306
+Database:         appdb
+Read username:    gateway_read
+Read secret ref:  prod_read
+Write username:   gateway_write
+Write secret ref: prod_write
+TLS mode:         required（目标 MySQL 已配置 TLS 时）
+```
+
+`prod_read` 对应 `DB_SECRET_PROD_READ`，`prod_write` 对应 `DB_SECRET_PROD_WRITE`。多资源或多组账号时，按同样规则增加 `DB_SECRET_<引用名>` 环境变量。
+
+控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除命名卷；生产环境不要执行 `docker compose down -v`。持久化不等于备份，应定期备份两个 MySQL 并测试恢复。
+
+如果需要让其他内网机器访问，把 Gateway 端口从 `127.0.0.1` 改为服务器私网 IP，并在防火墙中只允许内网网段。
 
 ## MCP 客户端配置
 
-将脚本生成的个人令牌放进 `Authorization`，不要使用管理员令牌连接 MCP：
+MCP 客户端必须使用普通用户自己的 Token，不要使用 `ADMIN_TOKEN`：
 
 ```json
 {
   "mcpServers": {
     "database-gateway": {
-      "url": "http://localhost:8080/mcp",
+      "url": "http://127.0.0.1:8080/mcp",
       "headers": {
         "Authorization": "Bearer dbag_REPLACE_WITH_USER_TOKEN"
       }
@@ -197,18 +190,20 @@ GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%
 }
 ```
 
-工具：
+生产环境如果通过内网 HTTPS 代理访问，将 URL 改为代理后的 `/mcp` 地址。
 
-- `list_databases`：仅返回当前账号有授权的逻辑资源，不返回主机或凭据
-- `list_tables`：需要 `schema_read` 或更高权限
-- `describe_table`：需要 `schema_read` 或更高权限
-- `query_sql`：SELECT 需要 `query_read`；INSERT/UPDATE/DELETE 需要 `query_write`
+可用工具：
 
-参数使用显式类型，避免客户端把任意 JSON 对象直接下传给驱动：
+- `list_databases`：列出当前用户获授权的逻辑资源；
+- `list_tables`：需要 `schema_read` 或更高权限；
+- `describe_table`：需要 `schema_read` 或更高权限；
+- `query_sql`：`SELECT` 需要 `query_read`，DML 需要 `query_write`。
+
+示例参数：
 
 ```json
 {
-  "resource_key": "database_a",
+  "resource_key": "orders",
   "sql": "SELECT id, customer, amount FROM orders WHERE id = ?",
   "params": [{"type": "int", "value": "1"}],
   "max_rows": 50,
@@ -216,56 +211,77 @@ GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%
 }
 ```
 
-## 本地开发
+## 配置参考
+
+| 变量 | 必需 | 说明 |
+| --- | --- | --- |
+| `CONTROL_DSN` | 是 | Control MySQL DSN；服务启动时自动迁移 |
+| `ADMIN_TOKEN` | 是 | 至少 20 个字符；兼容旧版管理 API，必须作为高敏感 Secret 保存 |
+| `TOKEN_PEPPER` | 是 | 至少 32 个字符；用于 Token 摘要、Session 和 Token 加密 |
+| `DB_SECRET_<引用名>` | 按资源 | 目标库密码，引用名会转换为大写环境变量名 |
+| `HTTP_ADDR` | 否 | 默认 `:8080` |
+| `WEB_DIR` | 否 | 默认 `web/dist`；容器中为 `/app/web` |
+
+不要随意更换 `TOKEN_PEPPER`：当前实现用它计算已有 Token/Session 摘要并解密已保存的 Token 配置，直接更换会使已有凭据失效。
+
+## 安全边界与当前限制
+
+已有防线包括：默认拒绝授权、读写账号隔离、SQL AST 守卫、结果/超时/写入限制、审计和字段脱敏。完整说明见 [docs/security.md](docs/security.md)。
+
+当前版本仍有明确边界：
+
+- 没有企业 SSO、MFA、细粒度管理员角色和完整 CSRF 防护；
+- 环境变量 Secret 解析器不是完整 Secret Manager；
+- 控制库审计表本身不是不可篡改账本；
+- 不提供通用的列级 DLP 或行级安全策略；
+- 单实例部署最简单，多副本需要额外处理迁移锁、MCP Session 和连接池预算。
+
+因此，首版建议部署在内网或 VPN 中，并限制管理台的网络访问。
+
+## 本地开发与验证
+
+后端：
 
 ```bash
-# 后端
 go test ./...
 go vet ./...
 go run ./cmd/gateway
+```
 
-# 前端（另一个终端）
+前端：
+
+```bash
 cd web
 npm ci
 npm run dev
 ```
 
-后端至少需要：
+完整检查：
 
-```text
-CONTROL_DSN
-ADMIN_TOKEN          # 至少 20 字符
-TOKEN_PEPPER         # 至少 32 字符
-DB_SECRET_<引用名>   # 例如 demo_read -> DB_SECRET_DEMO_READ
+```bash
+make check
 ```
 
-完整样例见 [.env.example](.env.example)。前端生产构建由 Go 服务同源提供，因此没有宽松 CORS 配置。
+验证记录见 [docs/verification.md](docs/verification.md)。
 
-## 目录
+## 项目结构
 
 ```text
 cmd/gateway/        服务入口、健康检查、静态站点
-internal/api/       管理 REST API 与 MCP 适配层
+internal/api/       管理 REST API、Session 和 MCP 适配层
 internal/authz/     动作层级、默认拒绝、约束合并
 internal/sqlguard/  MySQL AST 安全检查
 internal/query/     授权、执行、提交前复核、审计
 internal/target/    目标连接池和 Secret 引用解析
 internal/control/   控制面模型、迁移和存储
+internal/masking/   字段脱敏规则和 SQL 重写
 web/                React 管理台
 deploy/             演示目标库初始化
-docs/               调研和安全说明
+docs/               安全、调研和验证记录
 ```
 
-## 上线前必须调整
+## 贡献与许可证
 
-- 替换 Compose 内所有密码、`ADMIN_TOKEN` 与 `TOKEN_PEPPER`；通过 Secret Manager 注入，不写入镜像或配置仓库。
-- MCP 和管理台放在 HTTPS 反向代理后；目标 MySQL 使用 `required` TLS，并配置最小权限读写账号。
-- 管理接口增加企业 SSO/MFA、CSRF/来源控制和网络访问限制；当前管理员 Bearer Token 适用于内网首版。
-- 审计表导出到不可变存储并配置保留策略；当前 MySQL 表本身不是防篡改账本。
-- 当前首版聚焦资源/动作 RBAC，不包含列级脱敏或行级策略；若数据包含敏感字段，先通过受控视图或目标库权限隔离。
+提交变更前请运行 `make check`。涉及授权、SQL 守卫、Token 或 Secret 的改动，应同时补充边界测试和安全说明。
 
-更完整的威胁边界见 [docs/security.md](docs/security.md)。
-
-## License 与代码来源
-
-项目按 Apache License 2.0 分发。GoNavi 派生代码的原始提交、文件映射和修改内容见 [NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目使用 Apache License 2.0，第三方派生代码说明见 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
