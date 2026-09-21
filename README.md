@@ -66,6 +66,120 @@ docker compose up --build -d
 
 脚本会输出 `USER_A_TOKEN` 和 `USER_C_TOKEN`，每个令牌仅在创建时出现一次。脚本用于全新数据卷；重复执行前请在管理台删除/更名资源，或用 `docker compose down -v` 清空演示数据。
 
+## 生产部署（单实例、内网、Docker Compose）
+
+当前仓库的 `docker-compose.yml` 是演示配置：包含演示目标库、演示初始化 SQL 和开发密码。生产环境不要直接使用它，也不要挂载 `deploy/target-init.sql`。
+
+在“单个网关实例、控制库和目标库都运行在 Compose、数据需要持久化、网关不对公网开放”的场景下，不需要修改 Go 或 React 业务代码。建议在仓库根目录另建 `docker-compose.prod.yml`，使用独立的生产环境变量文件：
+
+```yaml
+services:
+  control-mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${CONTROL_MYSQL_ROOT_PASSWORD:?missing}
+      MYSQL_DATABASE: gateway
+      MYSQL_USER: gateway
+      MYSQL_PASSWORD: ${CONTROL_MYSQL_PASSWORD:?missing}
+    volumes:
+      - control-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  target-mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:?missing}
+    volumes:
+      - target-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  gateway:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      WEB_DIR: /app/web
+      CONTROL_DSN: "gateway:${CONTROL_MYSQL_PASSWORD}@tcp(control-mysql:3306)/gateway?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?missing}
+      TOKEN_PEPPER: ${TOKEN_PEPPER:?missing}
+      DB_SECRET_PROD_READ: ${TARGET_READ_PASSWORD:?missing}
+      DB_SECRET_PROD_WRITE: ${TARGET_WRITE_PASSWORD:?missing}
+    depends_on:
+      control-mysql:
+        condition: service_healthy
+      target-mysql:
+        condition: service_healthy
+
+volumes:
+  control-data:
+  target-data:
+```
+
+创建不纳入 Git 的 `.env.prod`，并限制文件权限：
+
+```dotenv
+CONTROL_MYSQL_ROOT_PASSWORD=<随机密码>
+CONTROL_MYSQL_PASSWORD=<随机密码>
+TARGET_MYSQL_ROOT_PASSWORD=<随机密码>
+TARGET_READ_PASSWORD=<目标库只读账号密码>
+TARGET_WRITE_PASSWORD=<目标库读写账号密码>
+ADMIN_TOKEN=<至少 20 个字符的随机字符串>
+TOKEN_PEPPER=<至少 32 个字符的随机字符串>
+```
+
+推荐使用 `openssl rand -hex 32` 生成随机值，并执行：
+
+```bash
+chmod 600 .env.prod
+docker compose --env-file .env.prod -f docker-compose.prod.yml config
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
+```
+
+验证网关：
+
+```bash
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
+```
+
+`control-data` 和 `target-data` 是持久化命名卷。普通的 `docker compose down` 不会删除数据，但生产环境不要执行 `docker compose down -v`。持久化不等于备份，仍应定期执行 MySQL 备份并测试恢复。
+
+网关访问目标库时使用 Docker 服务名 `target-mysql`。在管理台创建资源时填写：
+
+- Host：`target-mysql`
+- Port：`3306`
+- `read_secret_ref`：`prod_read`，对应 `DB_SECRET_PROD_READ`
+- `write_secret_ref`：`prod_write`，对应 `DB_SECRET_PROD_WRITE`
+- 目标库已配置 TLS 时使用 `tls_mode=required`
+
+`target-mysql` 只负责启动 MySQL，不会自动创建业务数据库和最小权限账号。启用资源前，请按实际业务库名称创建数据库及账号，例如：
+
+```sql
+CREATE DATABASE appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+CREATE USER 'gateway_read'@'%' IDENTIFIED BY '<只读密码>';
+GRANT SELECT, SHOW VIEW ON appdb.* TO 'gateway_read'@'%';
+
+CREATE USER 'gateway_write'@'%' IDENTIFIED BY '<读写密码>';
+GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%';
+```
+
+实际部署时应将 `'%'` 收紧为网关所在的受控网络范围，并将账号密码分别放入 `TARGET_READ_PASSWORD`、`TARGET_WRITE_PASSWORD`。如果有多个资源或多组账号，在 Compose 环境中增加对应的 `DB_SECRET_<引用名>` 变量。
+
+控制库会在网关首次启动时自动迁移。首次登录仍使用 `admin / admin_123`，必须在开放内网访问前修改管理员密码。管理台和 MCP 只绑定到 `127.0.0.1`；如需从内网其他机器访问，应绑定服务器私网 IP，并在防火墙中只允许内网网段。
+
 ## MCP 客户端配置
 
 将脚本生成的个人令牌放进 `Authorization`，不要使用管理员令牌连接 MCP：
