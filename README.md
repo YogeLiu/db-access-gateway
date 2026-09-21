@@ -72,41 +72,32 @@ flowchart LR
 
 没有匹配授权时默认拒绝。多个授权同时适用时，`require_reason` 取并集，行数和超时取更严格的限制。
 
-## 快速开始：演示环境
+## 快速开始：连接已有 MySQL
 
-需要 Docker Compose：
+本项目不会创建或保存业务数据库。你需要先准备一个 Gateway 能访问的已有 MySQL，并准备只读/读写账号；然后只启动控制库和 Gateway：
 
 ```bash
 docker compose up --build -d
 ```
 
-打开 <http://localhost:8080>，使用默认管理员登录：
+打开 <http://127.0.0.1:8080>，使用默认管理员登录：
 
 ```text
 账号：admin
 密码：admin_123
 ```
 
-首次登录后立即修改管理员密码。也可以安装 `jq` 后执行演示引导脚本，创建用户、资源、授权和个人 Token：
-
-```bash
-./scripts/bootstrap-demo.sh
-```
-
-脚本会输出 `USER_A_TOKEN` 和 `USER_C_TOKEN`；Token 只在创建时显示一次。演示数据使用全新的 Docker 卷，清空演示环境时才执行：
-
-```bash
-docker compose down -v
-```
+首次登录后立即修改管理员密码。在管理台创建资源时填写已有 MySQL 的 Host、端口、数据库名、读账号和写账号，然后执行连接测试。接着创建普通用户、授权和个人 MCP Token。
 
 ## 生产部署：单实例、内网、持久化
 
 生产环境不要直接使用演示用的 `docker-compose.yml`。仓库提供了独立的 [docker-compose.prod.yml](docker-compose.prod.yml) 和 [.env.prod.example](.env.prod.example)，满足以下拓扑：
 
 - 一个 Gateway 实例；
-- Control MySQL 和 Target MySQL 都运行在 Compose 中；
-- 数据保存到 `control-data` 和 `target-data` 命名卷；
-- MySQL 不发布宿主机端口；
+- Control MySQL 运行在 Compose 中；
+- 业务数据库使用已有的外部 MySQL，不由 Gateway 或生产 Compose 创建；
+- 控制数据保存到 `control-data` 命名卷，业务数据由现有数据库负责持久化和备份；
+- Control MySQL 不发布宿主机端口；
 - Gateway 默认只绑定 `127.0.0.1:8080`，不直接对公网开放。
 
 准备环境变量：
@@ -140,13 +131,11 @@ curl http://127.0.0.1:8080/readyz
 
 `readyz` 只检查 Control MySQL。目标库需要在管理台中单独执行连接测试。
 
-### 配置目标数据库
+### 配置已有目标数据库
 
-`target-mysql` 不会自动创建业务库和最小权限账号。启用资源前，根据实际业务库执行类似 SQL：
+Gateway 不会创建业务数据库、表或迁移业务数据。启用资源前，由数据库管理员在已有目标 MySQL 中准备最小权限账号；如果账号已经存在，直接使用现有账号即可：
 
 ```sql
-CREATE DATABASE appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 CREATE USER 'gateway_read'@'%' IDENTIFIED BY '<只读密码>';
 GRANT SELECT, SHOW VIEW ON appdb.* TO 'gateway_read'@'%';
 
@@ -157,7 +146,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%
 生产环境应将 `'%'` 收紧为网关所在的受控网络范围。管理台资源配置示例：
 
 ```text
-Host:             target-mysql
+Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Read username:    gateway_read
@@ -169,7 +158,7 @@ TLS mode:         required（目标 MySQL 已配置 TLS 时）
 
 `prod_read` 对应 `DB_SECRET_PROD_READ`，`prod_write` 对应 `DB_SECRET_PROD_WRITE`。多资源或多组账号时，按同样规则增加 `DB_SECRET_<引用名>` 环境变量。
 
-控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除命名卷；生产环境不要执行 `docker compose down -v`。持久化不等于备份，应定期备份两个 MySQL 并测试恢复。
+控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除 `control-data`；生产环境不要执行 `docker compose down -v`。业务数据由现有目标 MySQL 负责持久化和备份。
 
 如果需要让其他内网机器访问，把 Gateway 端口从 `127.0.0.1` 改为服务器私网 IP，并在防火墙中只允许内网网段。
 
@@ -276,7 +265,6 @@ internal/target/    目标连接池和 Secret 引用解析
 internal/control/   控制面模型、迁移和存储
 internal/masking/   字段脱敏规则和 SQL 重写
 web/                React 管理台
-deploy/             演示目标库初始化
 docs/               安全、调研和验证记录
 ```
 

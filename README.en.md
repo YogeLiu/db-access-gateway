@@ -72,41 +72,32 @@ The `query_sql` request path is:
 
 Authorization is default-deny. When multiple grants apply, `require_reason` is combined with OR semantics, while row and timeout limits use the strictest value.
 
-## Quick start: demo environment
+## Quick start: connect an existing MySQL
 
-Requires Docker Compose:
+This project does not create or store business databases. Prepare an existing MySQL reachable by the Gateway, together with separate read-only and read-write accounts, then start only the control database and Gateway:
 
 ```bash
 docker compose up --build -d
 ```
 
-Open <http://localhost:8080> and sign in with:
+Open <http://127.0.0.1:8080> and sign in with:
 
 ```text
 Username: admin
 Password: admin_123
 ```
 
-Change the administrator password immediately. To create the demo users, resources, grants, and personal tokens, install `jq` and run:
-
-```bash
-./scripts/bootstrap-demo.sh
-```
-
-The script prints `USER_A_TOKEN` and `USER_C_TOKEN`; each token is shown only once. The demo uses fresh Docker volumes. To reset the demo environment only, run:
-
-```bash
-docker compose down -v
-```
+Change the administrator password immediately. In the administration console, register the existing MySQL host, port, database name, read account, and write account, then test the connection. Create ordinary users, grants, and personal MCP tokens afterward.
 
 ## Production deployment: single instance, private network, persistent data
 
 Do not use the demo `docker-compose.yml` as a production configuration. The repository includes [docker-compose.prod.yml](docker-compose.prod.yml) and [.env.prod.example](.env.prod.example) for this topology:
 
 - one Gateway instance;
-- Control MySQL and Target MySQL inside Compose;
-- persistent `control-data` and `target-data` named volumes;
-- no published MySQL ports;
+- Control MySQL inside Compose;
+- an existing external MySQL for business data, never created by the Gateway or production Compose;
+- persistent control data in the `control-data` named volume, with business data backed up by the existing database owner;
+- no published Control MySQL port;
 - Gateway bound to `127.0.0.1:8080` by default, with no direct public exposure.
 
 Prepare the environment file outside version control:
@@ -140,13 +131,11 @@ curl http://127.0.0.1:8080/readyz
 
 `/readyz` checks only Control MySQL. Test every target resource separately from the administration console.
 
-### Provision the target database
+### Configure an existing target database
 
-`target-mysql` starts MySQL but does not create a business schema or least-privilege accounts. Before enabling a resource, apply SQL similar to:
+The Gateway does not create business databases, tables, or migrate business data. Before enabling a resource, a database administrator should provision least-privilege accounts on the existing target MySQL. If the accounts already exist, use them directly:
 
 ```sql
-CREATE DATABASE appdb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 CREATE USER 'gateway_read'@'%' IDENTIFIED BY '<read-only password>';
 GRANT SELECT, SHOW VIEW ON appdb.* TO 'gateway_read'@'%';
 
@@ -157,7 +146,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, SHOW VIEW ON appdb.* TO 'gateway_write'@'%
 Restrict `'%'` to the gateway's controlled network range in production. A resource can use:
 
 ```text
-Host:             target-mysql
+Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Read username:    gateway_read
@@ -169,7 +158,7 @@ TLS mode:         required (when TLS is configured on Target MySQL)
 
 `prod_read` resolves to `DB_SECRET_PROD_READ`; `prod_write` resolves to `DB_SECRET_PROD_WRITE`. Add more `DB_SECRET_<REFERENCE>` variables for additional resources or credential pairs.
 
-The Gateway applies control-database migrations on first startup. Change `admin / admin_123` before allowing internal users to access the service. Plain `docker compose down` preserves named volumes; never use `docker compose down -v` in production. Persistence is not backup: schedule MySQL backups and test restoration.
+The Gateway applies control-database migrations on first startup. Change `admin / admin_123` before allowing internal users to access the service. Plain `docker compose down` preserves `control-data`; never use `docker compose down -v` in production. Business-data persistence and backups remain the responsibility of the existing target MySQL.
 
 If other private-network machines need access, bind the Gateway port to the server's private IP instead of `127.0.0.1` and restrict the firewall to the private network.
 
@@ -276,7 +265,6 @@ internal/target/    target pools and secret-reference resolution
 internal/control/   control-plane models, migrations, and storage
 internal/masking/   field masking rules and SQL rewriting
 web/                React administration console
-deploy/             demo target-database initialization
 docs/               security, research, and verification notes
 ```
 

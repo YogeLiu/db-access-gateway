@@ -15,19 +15,6 @@ services:
       timeout: 3s
       retries: 30
 
-  target-mysql:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${TARGET_MYSQL_ROOT_PASSWORD:?missing}
-    volumes:
-      - target-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 3s
-      timeout: 3s
-      retries: 30
-
   gateway:
     build: .
     restart: unless-stopped
@@ -44,9 +31,6 @@ services:
     depends_on:
       control-mysql:
         condition: service_healthy
-      target-mysql:
-        condition: service_healthy
 
 volumes:
   control-data:
-  target-data:
