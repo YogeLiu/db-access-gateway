@@ -20,14 +20,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"
+    env_file:
+      - .env.gateway-secrets.prod
     environment:
       HTTP_ADDR: ":8080"
       WEB_DIR: /app/web
       CONTROL_DSN: "gateway:${CONTROL_MYSQL_PASSWORD}@tcp(control-mysql:3306)/gateway?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
       ADMIN_TOKEN: ${ADMIN_TOKEN:?missing}
       TOKEN_PEPPER: ${TOKEN_PEPPER:?missing}
-      DB_SECRET_PROD_READ: ${TARGET_READ_PASSWORD:?missing}
-      DB_SECRET_PROD_WRITE: ${TARGET_WRITE_PASSWORD:?missing}
     depends_on:
       control-mysql:
         condition: service_healthy

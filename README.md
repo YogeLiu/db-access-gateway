@@ -77,6 +77,8 @@ flowchart LR
 本项目不会创建或保存业务数据库。你需要先准备一个 Gateway 能访问的已有 MySQL，并准备只读/读写账号；然后只启动控制库和 Gateway：
 
 ```bash
+cp .env.example .env
+chmod 600 .env
 docker compose up --build -d
 ```
 
@@ -91,7 +93,7 @@ docker compose up --build -d
 
 ## 生产部署：单实例、内网、持久化
 
-生产环境不要直接使用演示用的 `docker-compose.yml`。仓库提供了独立的 [docker-compose.prod.yml](docker-compose.prod.yml) 和 [.env.prod.example](.env.prod.example)，满足以下拓扑：
+生产环境不要直接使用本地开发用的 `docker-compose.yml`。仓库提供了独立的 [docker-compose.prod.yml](docker-compose.prod.yml)、[.env.prod.example](.env.prod.example) 和 [.env.gateway-secrets.prod.example](.env.gateway-secrets.prod.example)，满足以下拓扑：
 
 - 一个 Gateway 实例；
 - Control MySQL 运行在 Compose 中；
@@ -104,17 +106,18 @@ docker compose up --build -d
 
 ```bash
 cp .env.prod.example .env.prod
-chmod 600 .env.prod
+cp .env.gateway-secrets.prod.example .env.gateway-secrets.prod
+chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-将 `.env.prod` 中的占位值全部替换，然后启动：
+将 `.env.prod` 中 Control MySQL 和 Gateway 的占位值替换；将每个已有目标 MySQL 账号的密码写入 `.env.gateway-secrets.prod`，变量名必须与资源的 Secret 引用匹配，然后启动：
 
 ```bash
 docker compose \
   --env-file .env.prod \
   -f docker-compose.prod.yml \
-  config
+  config --quiet
 
 docker compose \
   --env-file .env.prod \
@@ -150,13 +153,27 @@ Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Read username:    gateway_read
-Read secret ref:  prod_read
+Read secret ref:  app_prod_read
 Write username:   gateway_write
-Write secret ref: prod_write
+Write secret ref: app_prod_write
 TLS mode:         required（目标 MySQL 已配置 TLS 时）
 ```
 
-`prod_read` 对应 `DB_SECRET_PROD_READ`，`prod_write` 对应 `DB_SECRET_PROD_WRITE`。多资源或多组账号时，按同样规则增加 `DB_SECRET_<引用名>` 环境变量。
+上面的资源引用对应 `.env.gateway-secrets.prod` 中的配置：
+
+```dotenv
+DB_SECRET_APP_PROD_READ=<app 只读账号密码>
+DB_SECRET_APP_PROD_WRITE=<app 读写账号密码>
+```
+
+第二个目标库可以使用另一组引用，不需要改 Control MySQL 表结构：
+
+```dotenv
+DB_SECRET_ORDERS_PROD_READ=<orders 只读账号密码>
+DB_SECRET_ORDERS_PROD_WRITE=<orders 读写账号密码>
+```
+
+例如资源的 `read_secret_ref=orders_prod_read` 会解析为 `DB_SECRET_ORDERS_PROD_READ`。Secret 文件只注入 Gateway，不会通过 API 返回，也不会保存到 Control MySQL。
 
 控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除 `control-data`；生产环境不要执行 `docker compose down -v`。业务数据由现有目标 MySQL 负责持久化和备份。
 
@@ -207,7 +224,7 @@ MCP 客户端必须使用普通用户自己的 Token，不要使用 `ADMIN_TOKEN
 | `CONTROL_DSN` | 是 | Control MySQL DSN；服务启动时自动迁移 |
 | `ADMIN_TOKEN` | 是 | 至少 20 个字符；兼容旧版管理 API，必须作为高敏感 Secret 保存 |
 | `TOKEN_PEPPER` | 是 | 至少 32 个字符；用于 Token 摘要、Session 和 Token 加密 |
-| `DB_SECRET_<引用名>` | 按资源 | 目标库密码，引用名会转换为大写环境变量名 |
+| `DB_SECRET_<引用名>` | 按资源 | `.env.gateway-secrets.prod` 中的目标库密码；引用名会转换为大写环境变量名 |
 | `HTTP_ADDR` | 否 | 默认 `:8080` |
 | `WEB_DIR` | 否 | 默认 `web/dist`；容器中为 `/app/web` |
 

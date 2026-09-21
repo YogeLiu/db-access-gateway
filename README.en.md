@@ -77,6 +77,8 @@ Authorization is default-deny. When multiple grants apply, `require_reason` is c
 This project does not create or store business databases. Prepare an existing MySQL reachable by the Gateway, together with separate read-only and read-write accounts, then start only the control database and Gateway:
 
 ```bash
+cp .env.example .env
+chmod 600 .env
 docker compose up --build -d
 ```
 
@@ -91,7 +93,7 @@ Change the administrator password immediately. In the administration console, re
 
 ## Production deployment: single instance, private network, persistent data
 
-Do not use the demo `docker-compose.yml` as a production configuration. The repository includes [docker-compose.prod.yml](docker-compose.prod.yml) and [.env.prod.example](.env.prod.example) for this topology:
+Do not use the local development `docker-compose.yml` as a production configuration. The repository includes [docker-compose.prod.yml](docker-compose.prod.yml), [.env.prod.example](.env.prod.example), and [.env.gateway-secrets.prod.example](.env.gateway-secrets.prod.example) for this topology:
 
 - one Gateway instance;
 - Control MySQL inside Compose;
@@ -104,17 +106,18 @@ Prepare the environment file outside version control:
 
 ```bash
 cp .env.prod.example .env.prod
-chmod 600 .env.prod
+cp .env.gateway-secrets.prod.example .env.gateway-secrets.prod
+chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-Replace every placeholder in `.env.prod`, then validate and start the stack:
+Replace the Control MySQL and Gateway placeholders in `.env.prod`. Put the password for each existing target-MySQL account in `.env.gateway-secrets.prod`, using names that match the resource secret references, then validate and start the stack:
 
 ```bash
 docker compose \
   --env-file .env.prod \
   -f docker-compose.prod.yml \
-  config
+  config --quiet
 
 docker compose \
   --env-file .env.prod \
@@ -150,13 +153,27 @@ Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Read username:    gateway_read
-Read secret ref:  prod_read
+Read secret ref:  app_prod_read
 Write username:   gateway_write
-Write secret ref: prod_write
+Write secret ref: app_prod_write
 TLS mode:         required (when TLS is configured on Target MySQL)
 ```
 
-`prod_read` resolves to `DB_SECRET_PROD_READ`; `prod_write` resolves to `DB_SECRET_PROD_WRITE`. Add more `DB_SECRET_<REFERENCE>` variables for additional resources or credential pairs.
+The resource references above map to `.env.gateway-secrets.prod`:
+
+```dotenv
+DB_SECRET_APP_PROD_READ=<app read-account password>
+DB_SECRET_APP_PROD_WRITE=<app read-write-account password>
+```
+
+Use another pair for another target database without changing the Control MySQL schema:
+
+```dotenv
+DB_SECRET_ORDERS_PROD_READ=<orders read-account password>
+DB_SECRET_ORDERS_PROD_WRITE=<orders read-write-account password>
+```
+
+For example, `read_secret_ref=orders_prod_read` resolves to `DB_SECRET_ORDERS_PROD_READ`. The secret file is injected only into the Gateway, is never returned by the API, and is not stored in Control MySQL.
 
 The Gateway applies control-database migrations on first startup. Change `admin / admin_123` before allowing internal users to access the service. Plain `docker compose down` preserves `control-data`; never use `docker compose down -v` in production. Business-data persistence and backups remain the responsibility of the existing target MySQL.
 
@@ -207,7 +224,7 @@ Example arguments:
 | `CONTROL_DSN` | yes | Control MySQL DSN; migrations run at startup |
 | `ADMIN_TOKEN` | yes | At least 20 characters; legacy admin API credential, store as a high-sensitivity secret |
 | `TOKEN_PEPPER` | yes | At least 32 characters; used for token digests, sessions, and token encryption |
-| `DB_SECRET_<REFERENCE>` | per resource | Target database password; references are normalized into environment variable names |
+| `DB_SECRET_<REFERENCE>` | per resource | Target database password from `.env.gateway-secrets.prod`; references are normalized into environment variable names |
 | `HTTP_ADDR` | no | Defaults to `:8080` |
 | `WEB_DIR` | no | Defaults to `web/dist`; `/app/web` in the container |
 

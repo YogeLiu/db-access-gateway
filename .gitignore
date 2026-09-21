@@ -1,5 +1,6 @@
 .env
 .env.prod
+.env.gateway-secrets.prod
 bin/
 web/node_modules/
 web/dist/
