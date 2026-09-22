@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,10 +39,12 @@ func (h *AdminHandler) Register(mux *http.ServeMux) {
 	mux.Handle("PATCH /api/v1/admin/users/{id}", h.protect(http.HandlerFunc(h.updateUser)))
 	mux.Handle("GET /api/v1/admin/resources", h.protect(http.HandlerFunc(h.listResources)))
 	mux.Handle("POST /api/v1/admin/resources", h.protect(http.HandlerFunc(h.createResource)))
+	mux.Handle("POST /api/v1/admin/resources/batch", h.protect(http.HandlerFunc(h.createResourceBatch)))
 	mux.Handle("PATCH /api/v1/admin/resources/{id}", h.protect(http.HandlerFunc(h.updateResource)))
 	mux.Handle("POST /api/v1/admin/resources/{id}/test", h.protect(http.HandlerFunc(h.testResource)))
 	mux.Handle("GET /api/v1/admin/grants", h.protect(http.HandlerFunc(h.listGrants)))
 	mux.Handle("POST /api/v1/admin/grants", h.protect(http.HandlerFunc(h.upsertGrant)))
+	mux.Handle("PATCH /api/v1/admin/grants/{id}", h.protect(http.HandlerFunc(h.updateGrant)))
 	mux.Handle("DELETE /api/v1/admin/grants/{id}", h.protect(http.HandlerFunc(h.revokeGrant)))
 	mux.Handle("POST /api/v1/admin/authorize", h.protect(http.HandlerFunc(h.testAuthorization)))
 	mux.Handle("GET /api/v1/admin/audits", h.protect(http.HandlerFunc(h.listAudits)))
@@ -161,7 +164,8 @@ type resourceRequest struct {
 	Port               uint16 `json:"port"`
 	DatabaseName       string `json:"database_name"`
 	Username           string `json:"username"`
-	SecretRef          string `json:"secret_ref"`
+	Password           string `json:"password"`
+	SecretRef          string `json:"secret_ref"` // Deprecated compatibility path.
 	TLSMode            string `json:"tls_mode"`
 	MaxRows            uint32 `json:"max_rows"`
 	MaxWriteRows       uint32 `json:"max_write_rows"`
@@ -170,9 +174,15 @@ type resourceRequest struct {
 	Version            uint64 `json:"version"`
 }
 
-func validateResource(body resourceRequest) (control.Resource, error) {
-	if strings.TrimSpace(body.ResourceKey) == "" || strings.TrimSpace(body.Host) == "" || strings.TrimSpace(body.DatabaseName) == "" || strings.TrimSpace(body.Username) == "" || strings.TrimSpace(body.SecretRef) == "" {
-		return control.Resource{}, errors.New("resource_key, host, database_name, username and secret_ref are required")
+func validateResource(body resourceRequest, requirePassword bool) (control.Resource, error) {
+	if strings.TrimSpace(body.ResourceKey) == "" || strings.TrimSpace(body.Host) == "" || strings.TrimSpace(body.DatabaseName) == "" || strings.TrimSpace(body.Username) == "" {
+		return control.Resource{}, errors.New("resource_key, host, database_name and username are required")
+	}
+	if requirePassword && strings.TrimSpace(body.Password) == "" && strings.TrimSpace(body.SecretRef) == "" {
+		return control.Resource{}, errors.New("password is required when creating a resource")
+	}
+	if body.Password != "" && body.SecretRef != "" {
+		return control.Resource{}, errors.New("use password instead of secret_ref")
 	}
 	if body.Port == 0 {
 		body.Port = 3306
@@ -202,7 +212,7 @@ func validateResource(body resourceRequest) (control.Resource, error) {
 	if !validTLS {
 		return control.Resource{}, errors.New("invalid tls_mode")
 	}
-	return control.Resource{ResourceKey: strings.TrimSpace(body.ResourceKey), DisplayName: strings.TrimSpace(body.DisplayName), Host: strings.TrimSpace(body.Host), Port: body.Port, DatabaseName: strings.TrimSpace(body.DatabaseName), Username: strings.TrimSpace(body.Username), SecretRef: strings.TrimSpace(body.SecretRef), TLSMode: body.TLSMode, MaxRows: body.MaxRows, MaxWriteRows: body.MaxWriteRows, StatementTimeoutMS: body.StatementTimeoutMS, Enabled: body.Enabled, Version: body.Version}, nil
+	return control.Resource{ResourceKey: strings.TrimSpace(body.ResourceKey), DisplayName: strings.TrimSpace(body.DisplayName), Host: strings.TrimSpace(body.Host), Port: body.Port, DatabaseName: strings.TrimSpace(body.DatabaseName), Username: strings.TrimSpace(body.Username), Password: body.Password, SecretRef: strings.TrimSpace(body.SecretRef), TLSMode: body.TLSMode, MaxRows: body.MaxRows, MaxWriteRows: body.MaxWriteRows, StatementTimeoutMS: body.StatementTimeoutMS, Enabled: body.Enabled, Version: body.Version}, nil
 }
 
 func (h *AdminHandler) createResource(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +220,7 @@ func (h *AdminHandler) createResource(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	resource, err := validateResource(body)
+	resource, err := validateResource(body, true)
 	if err != nil {
 		writeError(w, 400, "invalid_resource", err.Error())
 		return
@@ -223,12 +233,89 @@ func (h *AdminHandler) createResource(w http.ResponseWriter, r *http.Request) {
 	h.adminAudit(r.Context(), "create_resource", "resource", item.ID)
 	writeJSON(w, 201, item)
 }
+
+type resourceBatchItem struct {
+	ResourceKey  string `json:"resource_key"`
+	DisplayName  string `json:"display_name"`
+	DatabaseName string `json:"database_name"`
+}
+
+type resourceBatchRequest struct {
+	Host               string              `json:"host"`
+	Port               uint16              `json:"port"`
+	Username           string              `json:"username"`
+	Password           string              `json:"password"`
+	TLSMode            string              `json:"tls_mode"`
+	MaxRows            uint32              `json:"max_rows"`
+	MaxWriteRows       uint32              `json:"max_write_rows"`
+	StatementTimeoutMS uint32              `json:"statement_timeout_ms"`
+	Enabled            bool                `json:"enabled"`
+	Resources          []resourceBatchItem `json:"resources"`
+}
+
+func validateResourceBatch(body resourceBatchRequest) ([]control.Resource, error) {
+	if len(body.Resources) == 0 {
+		return nil, errors.New("resources must contain at least one database")
+	}
+	if len(body.Resources) > 50 {
+		return nil, errors.New("resources cannot contain more than 50 databases")
+	}
+	seenKeys := make(map[string]struct{}, len(body.Resources))
+	resources := make([]control.Resource, 0, len(body.Resources))
+	for _, item := range body.Resources {
+		resource, err := validateResource(resourceRequest{
+			ResourceKey:        item.ResourceKey,
+			DisplayName:        item.DisplayName,
+			Host:               body.Host,
+			Port:               body.Port,
+			DatabaseName:       item.DatabaseName,
+			Username:           body.Username,
+			Password:           body.Password,
+			TLSMode:            body.TLSMode,
+			MaxRows:            body.MaxRows,
+			MaxWriteRows:       body.MaxWriteRows,
+			StatementTimeoutMS: body.StatementTimeoutMS,
+			Enabled:            body.Enabled,
+		}, true)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seenKeys[resource.ResourceKey]; exists {
+			return nil, fmt.Errorf("duplicate resource_key %q", resource.ResourceKey)
+		}
+		seenKeys[resource.ResourceKey] = struct{}{}
+		resources = append(resources, resource)
+	}
+	return resources, nil
+}
+
+func (h *AdminHandler) createResourceBatch(w http.ResponseWriter, r *http.Request) {
+	var body resourceBatchRequest
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	resources, err := validateResourceBatch(body)
+	if err != nil {
+		writeError(w, 400, "invalid_resource_batch", err.Error())
+		return
+	}
+	items, err := h.store.CreateResources(r.Context(), resources)
+	if err != nil {
+		writeError(w, 409, "resource_exists", "one or more resource_key values already exist")
+		return
+	}
+	for _, item := range items {
+		h.adminAudit(r.Context(), "create_resource", "resource", item.ID)
+	}
+	writeJSON(w, 201, items)
+}
+
 func (h *AdminHandler) updateResource(w http.ResponseWriter, r *http.Request) {
 	var body resourceRequest
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	resource, err := validateResource(body)
+	resource, err := validateResource(body, false)
 	if err != nil {
 		writeError(w, 400, "invalid_resource", err.Error())
 		return
@@ -276,16 +363,7 @@ func (h *AdminHandler) upsertGrant(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if _, err := authz.ParseAction(body.Action); err != nil {
-		writeError(w, 400, "invalid_action", "action must be schema_read, query_read or query_write")
-		return
-	}
-	if body.RowLimit != nil && (*body.RowLimit == 0 || *body.RowLimit > 1000) {
-		writeError(w, 400, "invalid_constraint", "row_limit must be 1..1000")
-		return
-	}
-	if body.StatementTimeoutMS != nil && (*body.StatementTimeoutMS < 100 || *body.StatementTimeoutMS > 10000) {
-		writeError(w, 400, "invalid_constraint", "statement_timeout_ms must be 100..10000")
+	if !validateGrant(w, body) {
 		return
 	}
 	item, err := h.store.UpsertGrant(r.Context(), body)
@@ -295,6 +373,44 @@ func (h *AdminHandler) upsertGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	h.adminAudit(r.Context(), "upsert_grant", "grant", item.ID)
 	writeJSON(w, 201, item)
+}
+
+func (h *AdminHandler) updateGrant(w http.ResponseWriter, r *http.Request) {
+	var body control.Grant
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !validateGrant(w, body) {
+		return
+	}
+	body.ID = r.PathValue("id")
+	item, err := h.store.UpdateGrant(r.Context(), body)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, 404, "not_found", "grant not found")
+		return
+	}
+	if err != nil {
+		writeError(w, 400, "invalid_grant", "grant conflicts with an existing authorization or references an unknown user or resource")
+		return
+	}
+	h.adminAudit(r.Context(), "update_grant", "grant", item.ID)
+	writeJSON(w, 200, item)
+}
+
+func validateGrant(w http.ResponseWriter, body control.Grant) bool {
+	if _, err := authz.ParseAction(body.Action); err != nil {
+		writeError(w, 400, "invalid_action", "action must be schema_read, query_read or query_write")
+		return false
+	}
+	if body.RowLimit != nil && (*body.RowLimit == 0 || *body.RowLimit > 1000) {
+		writeError(w, 400, "invalid_constraint", "row_limit must be 1..1000")
+		return false
+	}
+	if body.StatementTimeoutMS != nil && (*body.StatementTimeoutMS < 100 || *body.StatementTimeoutMS > 10000) {
+		writeError(w, 400, "invalid_constraint", "statement_timeout_ms must be 100..10000")
+		return false
+	}
+	return true
 }
 func (h *AdminHandler) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	err := h.store.RevokeGrant(r.Context(), r.PathValue("id"))

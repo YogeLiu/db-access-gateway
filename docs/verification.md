@@ -6,7 +6,7 @@
 
 | 检查 | 结果 |
 |---|---|
-| `go test -race ./...` | 通过；除权限/SQL 语料外，覆盖连接缓存的 32 并发冷启动合并、资源更新时在途连接拒绝和单资源凭据解析 |
+| `go test -race ./...` | 通过；除权限/SQL 语料外，覆盖连接缓存的 32 并发冷启动合并、资源更新时在途连接拒绝、加密数据库密码和单资源凭据解析 |
 | `go vet ./...` | 通过 |
 | `CGO_ENABLED=0 go build ... ./cmd/gateway` | 通过；生成静态、strip 后的 linux/amd64 二进制 |
 | `npm run build` | 通过；TypeScript project build 与 Vite production build 成功 |
@@ -26,4 +26,4 @@ docker compose \
   up --build -d
 ```
 
-然后在管理台注册一个已有目标 MySQL 资源，配置一套连接账号和 Secret 引用，测试连接，并在“授权判定测试”中核对 Gateway 的读写授权矩阵。这一项是发布前必须完成的验证门禁。
+然后在管理台添加一个已有目标 MySQL 资源，直接填写连接账号和密码，并在添加资源弹窗的 Database 区域登记多个数据库，测试连接；再在“授权判定测试”中核对 Gateway 的读写授权矩阵。这一项是发布前必须完成的验证门禁。

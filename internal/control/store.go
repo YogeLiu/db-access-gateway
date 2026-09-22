@@ -9,14 +9,16 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/yogel/db-access-gateway/internal/auth"
 	"github.com/yogel/db-access-gateway/internal/id"
 )
 
 type Store struct {
-	db *sql.DB
+	db           *sql.DB
+	secretPepper string
 }
 
-func Open(dsn string) (*Store, error) {
+func Open(dsn, secretPepper string) (*Store, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, err
@@ -25,7 +27,7 @@ func Open(dsn string) (*Store, error) {
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(10 * time.Minute)
 	db.SetConnMaxIdleTime(2 * time.Minute)
-	return &Store{db: db}, nil
+	return &Store{db: db, secretPepper: secretPepper}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -241,7 +243,7 @@ func (s *Store) ListResources(ctx context.Context) ([]Resource, error) {
 	defer rows.Close()
 	out := make([]Resource, 0)
 	for rows.Next() {
-		r, err := scanResource(rows)
+		r, err := s.scanResource(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -251,47 +253,119 @@ func (s *Store) ListResources(ctx context.Context) ([]Resource, error) {
 }
 
 const resourceSelect = `SELECT id, resource_key, display_name, host, port, database_name,
-	username, secret_ref, tls_mode, max_rows, max_write_rows,
+	username, secret_ref, password_ciphertext, tls_mode, max_rows, max_write_rows,
 	statement_timeout_ms, enabled, version, created_at, updated_at FROM database_resources`
 
 type scanner interface{ Scan(...any) error }
 
-func scanResource(row scanner) (Resource, error) {
+func (s *Store) scanResource(row scanner) (Resource, error) {
 	var r Resource
+	var secretRef sql.NullString
+	var passwordCiphertext []byte
 	err := row.Scan(&r.ID, &r.ResourceKey, &r.DisplayName, &r.Host, &r.Port, &r.DatabaseName,
-		&r.Username, &r.SecretRef, &r.TLSMode, &r.MaxRows, &r.MaxWriteRows,
+		&r.Username, &secretRef, &passwordCiphertext, &r.TLSMode, &r.MaxRows, &r.MaxWriteRows,
 		&r.StatementTimeoutMS, &r.Enabled, &r.Version, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return Resource{}, err
+	}
+	if secretRef.Valid {
+		r.SecretRef = secretRef.String
+	}
+	if len(passwordCiphertext) > 0 {
+		password, decryptErr := auth.OpenResourcePassword(s.secretPepper, r.ID, passwordCiphertext)
+		if decryptErr != nil {
+			return Resource{}, fmt.Errorf("decrypt resource password: %w", decryptErr)
+		}
+		r.Password = password
+		r.PasswordSet = true
+	}
 	return r, err
 }
 
 func (s *Store) GetResourceByKey(ctx context.Context, key string) (Resource, error) {
-	return scanResource(s.db.QueryRowContext(ctx, resourceSelect+` WHERE resource_key=?`, key))
+	return s.scanResource(s.db.QueryRowContext(ctx, resourceSelect+` WHERE resource_key=?`, key))
 }
 
 func (s *Store) GetResource(ctx context.Context, resourceID string) (Resource, error) {
-	return scanResource(s.db.QueryRowContext(ctx, resourceSelect+` WHERE id=?`, resourceID))
+	return s.scanResource(s.db.QueryRowContext(ctx, resourceSelect+` WHERE id=?`, resourceID))
 }
 
 func (s *Store) CreateResource(ctx context.Context, r Resource) (Resource, error) {
-	r.ID = id.New()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO database_resources
-		(id, resource_key, display_name, host, port, database_name, username, secret_ref,
-		 tls_mode, max_rows, max_write_rows, statement_timeout_ms, enabled)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ResourceKey, r.DisplayName, r.Host, r.Port,
-		r.DatabaseName, r.Username, r.SecretRef,
-		r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled)
+	items, err := s.CreateResources(ctx, []Resource{r})
 	if err != nil {
 		return Resource{}, err
 	}
-	return s.GetResource(ctx, r.ID)
+	return items[0], nil
+}
+
+func (s *Store) CreateResources(ctx context.Context, resources []Resource) ([]Resource, error) {
+	if len(resources) == 0 {
+		return []Resource{}, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(resources))
+	for _, resource := range resources {
+		resource.ID = id.New()
+		passwordCiphertext, err := s.encryptResourcePassword(resource.ID, resource.Password)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		var legacySecretRef any
+		if resource.SecretRef != "" {
+			legacySecretRef = resource.SecretRef
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO database_resources
+			(id, resource_key, display_name, host, port, database_name, username, secret_ref, password_ciphertext,
+			 tls_mode, max_rows, max_write_rows, statement_timeout_ms, enabled)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, resource.ID, resource.ResourceKey, resource.DisplayName,
+			resource.Host, resource.Port, resource.DatabaseName, resource.Username, legacySecretRef, passwordCiphertext,
+			resource.TLSMode, resource.MaxRows, resource.MaxWriteRows, resource.StatementTimeoutMS, resource.Enabled)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		ids = append(ids, resource.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	items := make([]Resource, 0, len(ids))
+	for _, resourceID := range ids {
+		item, err := s.GetResource(ctx, resourceID)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func (s *Store) UpdateResource(ctx context.Context, r Resource, expectedVersion uint64) (Resource, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE database_resources SET display_name=?, host=?, port=?, database_name=?,
-		username=?, secret_ref=?, tls_mode=?, max_rows=?,
-		max_write_rows=?, statement_timeout_ms=?, enabled=?, version=version+1 WHERE id=? AND version=?`, r.DisplayName,
-		r.Host, r.Port, r.DatabaseName, r.Username, r.SecretRef,
-		r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled, r.ID, expectedVersion)
+	var (
+		result sql.Result
+		err    error
+	)
+	if r.Password != "" {
+		passwordCiphertext, encryptErr := s.encryptResourcePassword(r.ID, r.Password)
+		if encryptErr != nil {
+			return Resource{}, encryptErr
+		}
+		result, err = s.db.ExecContext(ctx, `UPDATE database_resources SET display_name=?, host=?, port=?, database_name=?,
+			username=?, secret_ref=NULL, password_ciphertext=?, tls_mode=?, max_rows=?,
+			max_write_rows=?, statement_timeout_ms=?, enabled=?, version=version+1 WHERE id=? AND version=?`, r.DisplayName,
+			r.Host, r.Port, r.DatabaseName, r.Username, passwordCiphertext,
+			r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled, r.ID, expectedVersion)
+	} else {
+		result, err = s.db.ExecContext(ctx, `UPDATE database_resources SET display_name=?, host=?, port=?, database_name=?,
+			username=?, tls_mode=?, max_rows=?, max_write_rows=?, statement_timeout_ms=?, enabled=?, version=version+1
+			WHERE id=? AND version=?`, r.DisplayName, r.Host, r.Port, r.DatabaseName, r.Username,
+			r.TLSMode, r.MaxRows, r.MaxWriteRows, r.StatementTimeoutMS, r.Enabled, r.ID, expectedVersion)
+	}
 	if err != nil {
 		return Resource{}, err
 	}
@@ -300,6 +374,13 @@ func (s *Store) UpdateResource(ctx context.Context, r Resource, expectedVersion 
 		return Resource{}, ErrConflict
 	}
 	return s.GetResource(ctx, r.ID)
+}
+
+func (s *Store) encryptResourcePassword(resourceID, password string) ([]byte, error) {
+	if password == "" {
+		return nil, nil
+	}
+	return auth.SealResourcePassword(s.secretPepper, resourceID, password)
 }
 
 func (s *Store) ListGrants(ctx context.Context) ([]Grant, error) {
@@ -375,6 +456,21 @@ func (s *Store) UpsertGrant(ctx context.Context, g Grant) (Grant, error) {
 	return out, err
 }
 
+func (s *Store) UpdateGrant(ctx context.Context, g Grant) (Grant, error) {
+	_, err := s.db.ExecContext(ctx, `UPDATE grants SET principal_id=?, resource_id=?, action=?,
+		require_reason=?, row_limit=?, statement_timeout_ms=?, revoked_at=NULL
+		WHERE id=? AND revoked_at IS NULL`, g.PrincipalID, g.ResourceID, g.Action, g.RequireReason,
+		g.RowLimit, g.StatementTimeoutMS, g.ID)
+	if err != nil {
+		return Grant{}, err
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT g.id, g.principal_id, p.username, g.resource_id, r.resource_key,
+		g.action, g.require_reason, g.row_limit, g.statement_timeout_ms, g.revoked_at, g.created_at, g.updated_at
+		FROM grants g JOIN principals p ON p.id=g.principal_id JOIN database_resources r ON r.id=g.resource_id
+		WHERE g.id=? AND g.revoked_at IS NULL`, g.ID)
+	return scanGrant(row)
+}
+
 func (s *Store) RevokeGrant(ctx context.Context, grantID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE grants SET revoked_at=NOW(6) WHERE id=? AND revoked_at IS NULL`, grantID)
 	if err != nil {
@@ -417,7 +513,7 @@ func (s *Store) VisibleResources(ctx context.Context, principalID string) ([]Res
 	defer rows.Close()
 	out := make([]Resource, 0)
 	for rows.Next() {
-		r, err := scanResource(rows)
+		r, err := s.scanResource(rows)
 		if err != nil {
 			return nil, err
 		}

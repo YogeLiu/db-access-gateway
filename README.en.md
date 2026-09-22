@@ -88,7 +88,7 @@ Username: admin
 Password: admin_123
 ```
 
-Change the administrator password immediately. In the administration console, register the existing MySQL host, port, database name, connection account, and secret reference, then test the connection. Create ordinary users, grants, and personal MCP tokens afterward.
+Change the administrator password immediately. In the administration console, enter the existing MySQL host, port, connection account, and database password, then add one or more databases in the Database section of the resource dialog and test the connection. The Gateway encrypts the password with `TOKEN_PEPPER` before storing it in Control MySQL, and never returns the plaintext through the API. Create ordinary users, grants, and personal MCP tokens afterward.
 
 ## Production deployment: single instance, private network, persistent data
 
@@ -110,7 +110,7 @@ chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-Replace the Control MySQL and Gateway placeholders in `.env.prod`. Put the password for each target resource's connection account in `.env.gateway-secrets.prod`, using names that match the resource secret references, then validate and start the stack:
+Replace the Control MySQL and Gateway placeholders in `.env.prod`, then validate and start the stack. New resources receive their target database passwords through the administration console and store them encrypted; `.env.gateway-secrets.prod` is retained only for legacy `secret_ref` resources:
 
 ```bash
 docker compose \
@@ -142,13 +142,13 @@ Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Username:         app_gateway
-Secret ref:       app_prod
+Password:         enter directly in the administration console
 TLS mode:         required (when TLS is configured on Target MySQL)
 ```
 
 The account must have the underlying MySQL privileges required by the business operation. Gateway `query_read` and `query_write` grants decide which Gateway user may perform an action; they do not elevate a database account that is read-only.
 
-The resource references above map to `.env.gateway-secrets.prod`:
+Legacy resources using a Secret reference can continue to use `.env.gateway-secrets.prod`:
 
 ```dotenv
 DB_SECRET_APP_PROD=<app connection-account password>
@@ -160,9 +160,9 @@ Use another entry for another target database without changing the Control MySQL
 DB_SECRET_ORDERS_PROD=<orders connection-account password>
 ```
 
-For example, `secret_ref=orders_prod` resolves to `DB_SECRET_ORDERS_PROD`. The secret file is injected only into the Gateway, is never returned by the API, and is not stored in Control MySQL. Whether a user can read or write is controlled by the Gateway's `query_read` or `query_write` grant.
+For example, `secret_ref=orders_prod` resolves to `DB_SECRET_ORDERS_PROD`. New resources should not use `secret_ref`; enter the database password directly and let the Gateway store its AES-GCM ciphertext in Control MySQL. Whether a user can read or write is controlled by the Gateway's `query_read` or `query_write` grant.
 
-When upgrading from an older version, the Control MySQL migration prefers the old write credential when one was configured; otherwise it migrates the old read credential as the unified account. After upgrading, confirm that the secret references still exist and test each resource connection.
+When upgrading from an older version, the migration adds an encrypted password column and keeps the old Secret reference as a fallback. Edit each old resource and enter its new password to clear the legacy reference, then test every connection.
 
 The Gateway applies control-database migrations on first startup. Change `admin / admin_123` before allowing internal users to access the service. Plain `docker compose down` preserves `control-data`; never use `docker compose down -v` in production. Business-data persistence and backups remain the responsibility of the existing target MySQL.
 
@@ -212,12 +212,12 @@ Example arguments:
 | --- | --- | --- |
 | `CONTROL_DSN` | yes | Control MySQL DSN; migrations run at startup |
 | `ADMIN_TOKEN` | yes | At least 20 characters; legacy admin API credential, store as a high-sensitivity secret |
-| `TOKEN_PEPPER` | yes | At least 32 characters; used for token digests, sessions, and token encryption |
-| `DB_SECRET_<REFERENCE>` | per resource | Target database password from `.env.gateway-secrets.prod`; references are normalized into environment variable names |
+| `TOKEN_PEPPER` | yes | At least 32 characters; used for token/session and target-password encryption; do not rotate casually |
+| `DB_SECRET_<REFERENCE>` | legacy resources | Target password for legacy `.env.gateway-secrets.prod` references; new resources use the administration console |
 | `HTTP_ADDR` | no | Defaults to `:8080` |
 | `WEB_DIR` | no | Defaults to `web/dist`; `/app/web` in the container |
 
-Do not rotate `TOKEN_PEPPER` casually. The current implementation uses it to derive existing token/session digests and decrypt stored token configuration; replacing it invalidates existing credentials.
+Do not rotate `TOKEN_PEPPER` casually. The current implementation uses it to derive token/session digests, decrypt stored token configuration, and decrypt target database passwords; replacing it invalidates existing credentials and database connections.
 
 ## Security boundaries and limitations
 

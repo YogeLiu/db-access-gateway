@@ -28,7 +28,7 @@ func main() {
 		logger.Error("configuration invalid", "error", err)
 		os.Exit(1)
 	}
-	store, err := control.Open(cfg.ControlDSN)
+	store, err := control.Open(cfg.ControlDSN, cfg.TokenPepper)
 	if err != nil {
 		logger.Error("control store open failed", "error", err)
 		os.Exit(1)
@@ -137,6 +137,9 @@ func spaHandler(root string) http.Handler {
 			return
 		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			if path == "index.html" {
+				w.Header().Set("Cache-Control", "no-store")
+			}
 			http.ServeFile(w, r, candidate)
 			return
 		}
@@ -145,6 +148,7 @@ func spaHandler(root string) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, index)
 	})
 }

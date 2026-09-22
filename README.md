@@ -88,7 +88,7 @@ docker compose up --build -d
 密码：admin_123
 ```
 
-首次登录后立即修改管理员密码。在管理台创建资源时填写已有 MySQL 的 Host、端口、数据库名、连接账号和 Secret 引用，然后执行连接测试。接着创建普通用户、授权和个人 MCP Token。
+首次登录后立即修改管理员密码。在管理台添加资源时填写已有 MySQL 的 Host、端口、连接账号和数据库密码，并在 Database 区域添加一个或多个数据库，然后执行连接测试。密码由 Gateway 使用 `TOKEN_PEPPER` 加密后保存到 Control MySQL，API 和列表不会返回明文密码。接着创建普通用户、授权和个人 MCP Token。
 
 ## 生产部署：单实例、内网、持久化
 
@@ -110,7 +110,7 @@ chmod 600 .env.prod .env.gateway-secrets.prod
 openssl rand -hex 32
 ```
 
-将 `.env.prod` 中 Control MySQL 和 Gateway 的占位值替换；将每个目标资源连接账号的密码写入 `.env.gateway-secrets.prod`，变量名必须与资源的 Secret 引用匹配，然后启动：
+将 `.env.prod` 中 Control MySQL 和 Gateway 的占位值替换，然后启动。新资源的目标库账号和密码在管理台直接填写并加密保存；`.env.gateway-secrets.prod` 仅用于兼容旧版本的 `secret_ref` 资源：
 
 ```bash
 docker compose \
@@ -142,13 +142,13 @@ Host:             prod-mysql.internal
 Port:             3306
 Database:         appdb
 Username:         app_gateway
-Secret ref:       app_prod
+Password:         在管理台直接填写
 TLS mode:         required（目标 MySQL 已配置 TLS 时）
 ```
 
 该账号在目标 MySQL 中必须具备实际业务操作所需的底层权限；Gateway 的 `query_read` / `query_write` 授权只决定哪个 Gateway 用户可以执行动作，不会把一个底层只读账号提升为可写账号。
 
-上面的资源引用对应 `.env.gateway-secrets.prod` 中的配置：
+旧版资源如果仍使用 Secret 引用，可继续使用 `.env.gateway-secrets.prod`：
 
 ```dotenv
 DB_SECRET_APP_PROD=<app 连接账号密码>
@@ -160,9 +160,9 @@ DB_SECRET_APP_PROD=<app 连接账号密码>
 DB_SECRET_ORDERS_PROD=<orders 连接账号密码>
 ```
 
-例如资源的 `secret_ref=orders_prod` 会解析为 `DB_SECRET_ORDERS_PROD`。Secret 文件只注入 Gateway，不会通过 API 返回，也不会保存到 Control MySQL。用户是否可以读写，取决于其在 Gateway 中获得的 `query_read` 或 `query_write` 授权。
+例如资源的 `secret_ref=orders_prod` 会解析为 `DB_SECRET_ORDERS_PROD`。新资源不要再填写 `secret_ref`，直接填写数据库密码；密码会以 AES-GCM 密文存入 Control MySQL。用户是否可以读写，取决于其在 Gateway 中获得的 `query_read` 或 `query_write` 授权。
 
-从旧版本升级时，控制库迁移会把旧资源的写账号（如果配置过）优先迁移为统一账号，否则迁移旧读账号。升级后请确认 Secret 文件中的引用仍然存在，并逐个测试资源连接。
+从旧版本升级时，控制库会新增加密密码列并保留旧的 Secret 引用回退。编辑旧资源并填写新密码后，旧引用会被清除；升级后请逐个测试资源连接。
 
 控制库会在 Gateway 首次启动时自动迁移。首次登录仍是 `admin / admin_123`，必须在允许内网用户访问前修改。普通的 `docker compose down` 不会删除 `control-data`；生产环境不要执行 `docker compose down -v`。业务数据由现有目标 MySQL 负责持久化和备份。
 
@@ -212,12 +212,12 @@ MCP 客户端必须使用普通用户自己的 Token，不要使用 `ADMIN_TOKEN
 | --- | --- | --- |
 | `CONTROL_DSN` | 是 | Control MySQL DSN；服务启动时自动迁移 |
 | `ADMIN_TOKEN` | 是 | 至少 20 个字符；兼容旧版管理 API，必须作为高敏感 Secret 保存 |
-| `TOKEN_PEPPER` | 是 | 至少 32 个字符；用于 Token 摘要、Session 和 Token 加密 |
-| `DB_SECRET_<引用名>` | 按资源 | `.env.gateway-secrets.prod` 中的目标库密码；引用名会转换为大写环境变量名 |
+| `TOKEN_PEPPER` | 是 | 至少 32 个字符；用于 Token、Session 和数据库密码加密；不能随意更换 |
+| `DB_SECRET_<引用名>` | 兼容旧资源 | `.env.gateway-secrets.prod` 中旧版目标库密码；新资源直接在管理台填写 |
 | `HTTP_ADDR` | 否 | 默认 `:8080` |
 | `WEB_DIR` | 否 | 默认 `web/dist`；容器中为 `/app/web` |
 
-不要随意更换 `TOKEN_PEPPER`：当前实现用它计算已有 Token/Session 摘要并解密已保存的 Token 配置，直接更换会使已有凭据失效。
+不要随意更换 `TOKEN_PEPPER`：当前实现用它计算已有 Token/Session 摘要、解密 Token 配置和数据库密码，直接更换会使已有凭据和数据库连接失效。
 
 ## 安全边界与当前限制
 

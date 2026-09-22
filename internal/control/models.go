@@ -22,7 +22,9 @@ type Resource struct {
 	Port               uint16    `json:"port"`
 	DatabaseName       string    `json:"database_name"`
 	Username           string    `json:"username"`
-	SecretRef          string    `json:"secret_ref"`
+	Password           string    `json:"-"`
+	PasswordSet        bool      `json:"password_set"`
+	SecretRef          string    `json:"-"` // Legacy DB_SECRET_* reference; new resources use Password.
 	TLSMode            string    `json:"tls_mode"`
 	MaxRows            uint32    `json:"max_rows"`
 	MaxWriteRows       uint32    `json:"max_write_rows"`
