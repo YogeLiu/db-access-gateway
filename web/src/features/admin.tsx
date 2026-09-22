@@ -18,20 +18,24 @@ import { formatConstraint, formatDate } from '../lib/format'
 
 const localPageSize = 8
 
-type ResourceDraft = {
+type ResourceEntry = {
   resource_key: string
   display_name: string
+  database_name: string
+}
+
+type ResourceDraft = {
   host: string
   port: number
-  database_name: string
   username: string
-  secret_ref: string
+  password: string
   tls_mode: string
   max_rows: number
   max_write_rows: number
   statement_timeout_ms: number
   enabled: boolean
   version: number
+  databases: ResourceEntry[]
 }
 
 type GrantDraft = {
@@ -39,24 +43,22 @@ type GrantDraft = {
   resource_id: string
   action: Grant['action']
   require_reason: boolean
-  row_limit: number
-  statement_timeout_ms: number
+  row_limit: number | null
+  statement_timeout_ms: number | null
 }
 
 const newResourceDraft = (): ResourceDraft => ({
-  resource_key: '',
-  display_name: '',
   host: '',
   port: 3306,
-  database_name: '',
   username: '',
-  secret_ref: '',
+  password: '',
   tls_mode: 'required',
   max_rows: 1000,
   max_write_rows: 100,
   statement_timeout_ms: 10000,
   enabled: false,
   version: 0,
+  databases: [{ resource_key: '', display_name: '', database_name: '' }],
 })
 
 const newGrantDraft = (): GrantDraft => ({
@@ -316,8 +318,31 @@ function Resources({
 
   async function save(event: FormEvent) {
     event.preventDefault()
+    const database = draft.databases[0]
+    const common = {
+      host: draft.host,
+      port: draft.port,
+      username: draft.username,
+      password: draft.password,
+      tls_mode: draft.tls_mode,
+      max_rows: draft.max_rows,
+      max_write_rows: draft.max_write_rows,
+      statement_timeout_ms: draft.statement_timeout_ms,
+      enabled: draft.enabled,
+    }
     try {
-      await api(editingId ? `/api/v1/admin/resources/${editingId}` : '/api/v1/admin/resources', { method: editingId ? 'PATCH' : 'POST', body: JSON.stringify(draft) })
+      if (editingId) {
+        await api(`/api/v1/admin/resources/${editingId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ ...common, ...database, version: draft.version }),
+        })
+      } else {
+        await api('/api/v1/admin/resources/batch', {
+          method: 'POST',
+          body: JSON.stringify({ ...common, resources: draft.databases }),
+        })
+        notify(`已创建 ${draft.databases.length} 个数据库资源`)
+      }
       closeEditor()
       await refresh()
     } catch (error) {
@@ -343,21 +368,40 @@ function Resources({
   function edit(resource: Resource) {
     setEditingId(resource.id)
     setDraft({
-      resource_key: resource.resource_key,
-      display_name: resource.display_name,
       host: resource.host,
       port: resource.port,
-      database_name: resource.database_name,
       username: resource.username,
-      secret_ref: resource.secret_ref,
+      password: '',
       tls_mode: resource.tls_mode,
       max_rows: resource.max_rows,
       max_write_rows: resource.max_write_rows,
       statement_timeout_ms: resource.statement_timeout_ms,
       enabled: resource.enabled,
       version: resource.version,
+      databases: [{ resource_key: resource.resource_key, display_name: resource.display_name, database_name: resource.database_name }],
     })
     setOpen(true)
+  }
+
+  function updateDatabaseRow(index: number, field: keyof ResourceEntry, value: string) {
+    setDraft((previous) => ({
+      ...previous,
+      databases: previous.databases.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item),
+    }))
+  }
+
+  function addDatabaseRow() {
+    setDraft((previous) => ({
+      ...previous,
+      databases: [...previous.databases, { resource_key: '', display_name: '', database_name: '' }],
+    }))
+  }
+
+  function removeDatabaseRow(index: number) {
+    setDraft((previous) => ({
+      ...previous,
+      databases: previous.databases.length > 1 ? previous.databases.filter((_, itemIndex) => itemIndex !== index) : previous.databases,
+    }))
   }
 
   return (
@@ -366,7 +410,7 @@ function Resources({
         <SectionHeader
           kicker="数据源"
           title="数据库资源"
-          detail="资源凭据只由网关持有；用户只能看到自己被授予的资源和动作。"
+          detail="数据库密码直接填写，由网关加密保存；用户只能看到自己被授予的资源和动作。"
           action={<button className="button buttonPrimary" type="button" onClick={() => { setDraft(newResourceDraft()); setEditingId(null); setOpen(true) }}>＋ 添加资源</button>}
         />
         <ListToolbar query={query} onQueryChange={setQuery} placeholder="搜索资源键、主机或数据库名" count={paged.total} />
@@ -379,7 +423,7 @@ function Resources({
                 <tr key={resource.id}>
                   <td><strong>{resource.display_name || resource.resource_key}</strong><small><code>{resource.resource_key}</code></small></td>
                   <td><code>{resource.host}:{resource.port}</code><small>{resource.database_name}</small></td>
-				  <td><strong>{resource.username}</strong><small>TLS：{resource.tls_mode}</small></td>
+                  <td><strong>{resource.username}</strong><small>TLS：{resource.tls_mode} · 密码{resource.password_set ? '已加密' : '未设置'}</small></td>
                   <td>{resource.max_rows} 行<small>{resource.statement_timeout_ms} ms</small></td>
                   <td><Status value={resource.enabled ? 'enabled' : 'disabled'} /></td>
                   <td><div className="rowActions"><button className="tableButton" type="button" onClick={() => edit(resource)}>编辑</button><button className="tableButton" type="button" onClick={() => void test(resource)}>测试连接</button></div></td>
@@ -394,18 +438,30 @@ function Resources({
       {open && (
         <Modal title={editingId ? '编辑数据库资源' : '登记数据库资源'} onClose={closeEditor} wide>
           <form className="form compactForm" onSubmit={save}>
-            <div className="fieldGrid">
-              <label htmlFor="resource-key">资源键<input id="resource-key" name="resource_key" value={draft.resource_key} disabled={Boolean(editingId)} onChange={(event) => setDraft({ ...draft, resource_key: event.target.value })} autoComplete="off" required placeholder="doc_ai" /></label>
-              <label htmlFor="resource-display-name">显示名称<input id="resource-display-name" name="display_name" value={draft.display_name} onChange={(event) => setDraft({ ...draft, display_name: event.target.value })} autoComplete="off" placeholder="Document AI" /></label>
-            </div>
+            <section className="formSection">
+              <div className="sectionHeader"><div><span className="sectionKicker">数据库</span><h3>{editingId ? '数据库资源' : '同一实例下的数据库'}</h3></div></div>
+              {!editingId && <p className="formHint">以下连接信息由所有数据库共享；每一行会创建一个独立的资源和授权对象。</p>}
+              {draft.databases.map((item, index) => (
+                <div className="fieldGrid databaseEntry" key={index}>
+                  <label htmlFor={`resource-key-${index}`}>资源键<input id={`resource-key-${index}`} name={`resource_key_${index}`} value={item.resource_key} disabled={Boolean(editingId)} onChange={(event) => updateDatabaseRow(index, 'resource_key', event.target.value)} autoComplete="off" required placeholder="orders_prod" /></label>
+                  <label htmlFor={`resource-display-name-${index}`}>显示名称<input id={`resource-display-name-${index}`} name={`display_name_${index}`} value={item.display_name} onChange={(event) => updateDatabaseRow(index, 'display_name', event.target.value)} autoComplete="off" placeholder="Orders" /></label>
+                  <div className="databaseRow">
+                    <label htmlFor={`resource-database-${index}`}>Database<input id={`resource-database-${index}`} name={`database_name_${index}`} value={item.database_name} onChange={(event) => updateDatabaseRow(index, 'database_name', event.target.value)} autoComplete="off" required placeholder="orders" /></label>
+                    {!editingId && <div className="databaseRowActions">
+                      {index === 0 && <button className="databaseActionButton databaseActionAdd" type="button" onClick={addDatabaseRow} aria-label="添加数据库">＋</button>}
+                      {index > 0 && <button className="databaseActionButton databaseActionRemove" type="button" onClick={() => removeDatabaseRow(index)} aria-label="移除数据库">−</button>}
+                    </div>}
+                  </div>
+                </div>
+              ))}
+            </section>
             <div className="fieldGrid">
               <label htmlFor="resource-host">Host<input id="resource-host" name="host" value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} autoComplete="off" required placeholder="127.0.0.1" /></label>
               <label htmlFor="resource-port">Port<input id="resource-port" name="port" type="number" value={draft.port} onChange={(event) => setDraft({ ...draft, port: Number(event.target.value) })} required /></label>
             </div>
-            <label htmlFor="resource-database">Database<input id="resource-database" name="database_name" value={draft.database_name} onChange={(event) => setDraft({ ...draft, database_name: event.target.value })} autoComplete="off" required placeholder="doc_ai" /></label>
             <div className="fieldGrid">
               <label htmlFor="resource-username">连接账号<input id="resource-username" name="username" value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} autoComplete="off" required /></label>
-              <label htmlFor="resource-secret">Secret ref<input id="resource-secret" name="secret_ref" value={draft.secret_ref} onChange={(event) => setDraft({ ...draft, secret_ref: event.target.value })} autoComplete="off" required /></label>
+              <label htmlFor="resource-password">数据库密码<input id="resource-password" name="password" type="password" value={draft.password} onChange={(event) => setDraft({ ...draft, password: event.target.value })} autoComplete="new-password" required={!editingId} placeholder={editingId ? '留空表示保持原密码' : '直接填写目标库密码'} /></label>
             </div>
             <div className="fieldGrid fieldGridThree">
               <label htmlFor="resource-tls">TLS<select id="resource-tls" name="tls_mode" value={draft.tls_mode} onChange={(event) => setDraft({ ...draft, tls_mode: event.target.value })}><option value="required">required</option><option value="preferred">preferred</option><option value="skip_verify">skip_verify</option><option value="disabled">disabled（不启用）</option></select></label>
@@ -437,6 +493,7 @@ function Grants({
 }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState<GrantDraft>(newGrantDraft())
   const [test, setTest] = useState<{ principal_id: string; resource_id: string; action: Grant['action'] }>({ principal_id: '', resource_id: '', action: 'query_read' })
   const [decision, setDecision] = useState<boolean | null>(null)
@@ -447,13 +504,40 @@ function Grants({
   async function save(event: FormEvent) {
     event.preventDefault()
     try {
-      await api('/api/v1/admin/grants', { method: 'POST', body: JSON.stringify(form) })
-      setOpen(false)
-      setForm(newGrantDraft())
+      await api(editingId ? `/api/v1/admin/grants/${editingId}` : '/api/v1/admin/grants', {
+        method: editingId ? 'PATCH' : 'POST',
+        body: JSON.stringify(form),
+      })
+      closeEditor()
       await refresh()
     } catch (error) {
       fail((error as Error).message)
     }
+  }
+
+  function openEditor() {
+    setEditingId(null)
+    setForm(newGrantDraft())
+    setOpen(true)
+  }
+
+  function closeEditor() {
+    setOpen(false)
+    setEditingId(null)
+    setForm(newGrantDraft())
+  }
+
+  function edit(grant: Grant) {
+    setEditingId(grant.id)
+    setForm({
+      principal_id: grant.principal_id,
+      resource_id: grant.resource_id,
+      action: grant.action,
+      require_reason: grant.require_reason,
+      row_limit: grant.row_limit ?? null,
+      statement_timeout_ms: grant.statement_timeout_ms ?? null,
+    })
+    setOpen(true)
   }
 
   async function revoke(id: string) {
@@ -482,7 +566,7 @@ function Grants({
           kicker="访问策略"
           title="授权矩阵"
           detail="动作按 schema_read、query_read、query_write 逐级收敛，默认拒绝。"
-          action={<button className="button buttonPrimary" type="button" onClick={() => setOpen(true)}>＋ 新增授权</button>}
+          action={<button className="button buttonPrimary" type="button" onClick={openEditor}>＋ 新增授权</button>}
         />
         <ListToolbar query={query} onQueryChange={setQuery} placeholder="搜索账号、资源或动作" count={paged.total} />
         <div className="tableScroll">
@@ -497,7 +581,7 @@ function Grants({
                   <td><span className={`actionTag action-${grant.action}`}>{grant.action}</span></td>
                   <td>{formatConstraint(grant.row_limit, grant.statement_timeout_ms, grant.require_reason)}</td>
                   <td>{formatDate(grant.created_at)}</td>
-                  <td><button className="tableButton tableButtonDanger" type="button" onClick={() => void revoke(grant.id)}>撤销</button></td>
+                  <td><div className="rowActions"><button className="tableButton" type="button" onClick={() => edit(grant)}>编辑</button><button className="tableButton tableButtonDanger" type="button" onClick={() => void revoke(grant.id)}>撤销</button></div></td>
                 </tr>
               )) : <TableEmpty colSpan={6} title={query ? '没有匹配的授权' : '还没有授权策略'} />}
             </tbody>
@@ -522,14 +606,14 @@ function Grants({
       </section>
 
       {open && (
-        <Modal title="新增 / 收紧授权" onClose={() => setOpen(false)}>
+        <Modal title={editingId ? '修改授权' : '新增 / 收紧授权'} onClose={closeEditor}>
           <form className="form" onSubmit={save}>
             <label htmlFor="grant-principal">账号<select id="grant-principal" name="principal_id" value={form.principal_id} onChange={(event) => setForm({ ...form, principal_id: event.target.value })} required><option value="">选择账号</option>{users.filter((user) => user.role === 'user').map((user) => <option key={user.id} value={user.id}>{user.username}</option>)}</select></label>
             <label htmlFor="grant-resource">数据库资源<select id="grant-resource" name="resource_id" value={form.resource_id} onChange={(event) => setForm({ ...form, resource_id: event.target.value })} required><option value="">选择资源</option>{resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.resource_key}</option>)}</select></label>
             <label htmlFor="grant-action">动作<select id="grant-action" name="action" value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value as Grant['action'] })}><option value="schema_read">schema_read</option><option value="query_read">query_read</option><option value="query_write">query_write</option></select></label>
-            <div className="fieldGrid"><label htmlFor="grant-row-limit">行数上限<input id="grant-row-limit" name="row_limit" type="number" value={form.row_limit} onChange={(event) => setForm({ ...form, row_limit: Number(event.target.value) })} /></label><label htmlFor="grant-timeout">超时 ms<input id="grant-timeout" name="statement_timeout_ms" type="number" value={form.statement_timeout_ms} onChange={(event) => setForm({ ...form, statement_timeout_ms: Number(event.target.value) })} /></label></div>
+            <div className="fieldGrid"><label htmlFor="grant-row-limit">行数上限<input id="grant-row-limit" name="row_limit" type="number" value={form.row_limit ?? ''} onChange={(event) => setForm({ ...form, row_limit: event.target.value === '' ? null : Number(event.target.value) })} /></label><label htmlFor="grant-timeout">超时 ms<input id="grant-timeout" name="statement_timeout_ms" type="number" value={form.statement_timeout_ms ?? ''} onChange={(event) => setForm({ ...form, statement_timeout_ms: event.target.value === '' ? null : Number(event.target.value) })} /></label></div>
             <label className="checkField" htmlFor="grant-reason"><input id="grant-reason" type="checkbox" checked={form.require_reason} onChange={(event) => setForm({ ...form, require_reason: event.target.checked })} />必须提供 reason</label>
-            <ModalActions onCancel={() => setOpen(false)} submit="保存授权" />
+            <ModalActions onCancel={closeEditor} submit={editingId ? '保存修改' : '保存授权'} />
           </form>
         </Modal>
       )}

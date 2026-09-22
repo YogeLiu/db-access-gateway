@@ -28,6 +28,9 @@ services:
       CONTROL_DSN: "gateway:${CONTROL_MYSQL_PASSWORD:-local-control-password}@tcp(control-mysql:3306)/gateway?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci"
       ADMIN_TOKEN: ${ADMIN_TOKEN:-local-admin-token-change-before-prod}
       TOKEN_PEPPER: ${TOKEN_PEPPER:-local-token-pepper-change-before-prod-32chars}
+    dns:
+      - ${GATEWAY_DNS_1:-100.100.100.100}
+      - ${GATEWAY_DNS_2:-118.31.177.255}
     depends_on:
       control-mysql:
         condition: service_healthy

@@ -9,6 +9,8 @@ import (
 )
 
 func resolveSecret(ref string) (string, error) {
+	// Legacy compatibility for resources created before passwords were stored
+	// encrypted in the control database.
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", errors.New("credential reference is empty")

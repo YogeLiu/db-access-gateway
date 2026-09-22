@@ -152,3 +152,16 @@ func TestConnectionConfigUsesOneResourceCredential(t *testing.T) {
 		t.Fatalf("unexpected credential: user=%q password=%q", config.User, config.Password)
 	}
 }
+
+func TestConnectionConfigUsesEncryptedResourcePasswordValue(t *testing.T) {
+	config, err := connectionConfig(control.Resource{
+		ID: "resource-a", Version: 1, Host: "mysql", Port: 3306, DatabaseName: "app",
+		Username: "app_user", Password: "password-with-%&", TLSMode: "disabled",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Password != "password-with-%&" {
+		t.Fatalf("unexpected password: %q", config.Password)
+	}
+}

@@ -58,7 +58,7 @@ flowchart TB
 关键边界：
 
 - MCP 客户端只提交 `resource_key`，不能提交 host、DSN、用户名或密码。
-- 控制面保存 Secret 引用，不保存目标库明文密码；运行时从环境/Secret 注入解析。
+- 控制面接收管理员填写的目标库密码，以 `TOKEN_PEPPER` 派生的 AES-GCM 密文保存；旧版 Secret 引用仅作为兼容回退。
 - 查询权限在建连前检查；读取返回前、写入提交前再次检查。
 - 连接池使用资源配置的一套账号；只有动作被判定并授权为 `query_write` 后才执行写事务。
 - 目标库账号即使权限较宽，AST 守卫仍拒绝 DDL 和危险语句；Gateway 授权即使出现缺陷，目标账号的 schema 范围和数据库治理仍限制破坏面。
@@ -70,7 +70,7 @@ flowchart TB
 | 管理员注册账号 | `POST /api/v1/admin/users` + 管理台账号页 |
 | 账号密码与角色工作区 | `/api/v1/auth/*` 会话接口；管理员/用户页面分流 |
 | 用户自助 access token | `/api/v1/me/tokens` 创建、查看和撤销；完整 token 只返回一次 |
-| 管理数据库资源 | 资源表、Secret 引用、连接测试、乐观版本号 |
+| 管理数据库资源 | 资源表、加密密码、旧版 Secret 引用回退、连接测试、批量创建和乐观版本号 |
 | 复用 GoNavi 连接管理 | MySQLDB、池配置、健康检查、坏连接剔除、singleflight、返回前复核 |
 | 授权资源和动作 | direct grant，唯一键为 `(principal, resource, action)` |
 | 默认拒绝 | `authz.Evaluate` 无匹配 grant 返回 deny |

@@ -127,4 +127,7 @@ var migrations = []string{
 		DROP COLUMN read_secret_ref,
 		DROP COLUMN write_username,
 		DROP COLUMN write_secret_ref`,
+	`ALTER TABLE database_resources
+		ADD COLUMN password_ciphertext BLOB NULL AFTER username,
+		MODIFY secret_ref VARCHAR(128) NULL`,
 }

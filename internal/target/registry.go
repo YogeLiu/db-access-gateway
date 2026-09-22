@@ -70,12 +70,19 @@ func (r *Registry) Get(ctx context.Context, resource control.Resource) (*sql.DB,
 }
 
 func connectionConfig(resource control.Resource) (ConnectionConfig, error) {
-	if strings.TrimSpace(resource.Username) == "" || strings.TrimSpace(resource.SecretRef) == "" {
-		return ConnectionConfig{}, errors.New("database credential is not configured for resource")
+	if strings.TrimSpace(resource.Username) == "" {
+		return ConnectionConfig{}, errors.New("database username is not configured for resource")
 	}
-	password, err := resolveSecret(resource.SecretRef)
-	if err != nil {
-		return ConnectionConfig{}, err
+	password := resource.Password
+	if password == "" {
+		if strings.TrimSpace(resource.SecretRef) == "" {
+			return ConnectionConfig{}, errors.New("database password is not configured for resource")
+		}
+		var err error
+		password, err = resolveSecret(resource.SecretRef)
+		if err != nil {
+			return ConnectionConfig{}, err
+		}
 	}
 	return ConnectionConfig{
 		ResourceID: resource.ID, Version: resource.Version,
